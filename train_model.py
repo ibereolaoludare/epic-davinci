@@ -27,11 +27,11 @@ if __name__ == "__main__":
     # 3. Initialize or Load the AI Brain (PPO)
     if os.path.exists("ppo_deriv_bot.zip"):
         print("Loading existing PPO Neural Network...")
-        model = PPO.load("ppo_deriv_bot", env=env, verbose=1, learning_rate=0.00005, device="auto")
+        model = PPO.load("ppo_deriv_bot", env=env, verbose=1, learning_rate=0.00005, ent_coef=0.0001, batch_size=128, device="auto")
     else:
         print("Initializing new PPO Neural Network...")
         # Using 'MlpPolicy' since our data is tabular numeric data
-        model = PPO("MlpPolicy", env, verbose=1, learning_rate=0.00005, device="auto")
+        model = PPO("MlpPolicy", env, verbose=1, learning_rate=0.00005, ent_coef=0.0001, batch_size=128, device="auto")
     
     # 4. Train the AI
     print("Starting Training! This is where your CPU/GPU works hard...")

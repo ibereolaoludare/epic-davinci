@@ -23,7 +23,7 @@ async def download_history():
                 "count": 5000,
                 "end": str(end_time),
                 "style": "candles",
-                "granularity": 60 # 60 seconds = 1 minute candles
+                "granularity": 900 # 900 seconds = 15 minute candles
             })
             
             await websocket.send(history_request)

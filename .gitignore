@@ -1,0 +1,21 @@
+# Python environments
+venv/
+venv_gpu/
+env/
+.env/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data files (you may want to keep these tracked if they're small, but usually good to ignore large csvs)
+# *.csv
+# *.png
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VS Code / IDEs
+.vscode/
+.idea/
