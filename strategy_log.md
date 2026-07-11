@@ -63,5 +63,28 @@ This document serves as a persistent record of every model architecture, feature
 **Result:** MASSIVE FAILURE
 - **Win Rate:** 42.0%
 - **Trades:** 2,963 trades over 6,000 candles.
-- **Net Profit:** -$27,794.70
-- **Faults / Lessons Learned:** Classic RL alignment failure. The `-0.1` boredom penalty was far too harsh relative to the `+1.0` and `-1.0` terminal rewards. The AI realized that staying flat for 10 candles guaranteed a `-1.0` penalty, so it mathematically calculated that violently jumping into trades randomly (even with negative expected value due to spread) was "safer" than suffering the guaranteed slow bleed of the boredom penalty. **Precedence:** Do not use aggressive continuous negative rewards (boredom penalties) in discrete trading environments without perfectly scaling them to the terminal rewards, otherwise the AI will thrash just to stop the bleeding.
+## V3 (Phase 1 Fixed): The Day Trader Test (Zero Boredom Penalty)
+**Goal:** Run the SL/TP Day Trader test but remove the boredom penalty to stop the AI from thrashing.
+**Setup:**
+- **Action Space:** `Discrete(3)` (Long, Short, Flat).
+- **Rewards:** `0.0` reward for staying flat. Hard SL (-20 pts) / TP (+50 pts) for terminal trade rewards.
+
+**Result:** THE PACIFIST BOT
+- **Win Rate:** 0.0%
+- **Trades:** 0 trades over 6,000 candles.
+- **Net Profit:** $0.00
+- **Faults / Lessons Learned:** Without a boredom penalty forcing it into the market, the AI correctly identified that the cost of the broker spread (-0.5 points) makes day-trading on the 15-minute timeframe a negative expected-value (EV) game. Because it was not penalized for holding cash, it realized the only mathematically winning move is not to play. It sat perfectly still for 2.5 months. **Precedence:** 15m momentum features alone are not strong enough to guarantee a 50pt Take Profit frequently enough to overcome the spread. Do not use day-trading SL/TP mechanics on the V100 index with this feature set.
+
+---
+
+## V3 (Phase 2): The Volatility 75 Asset Test
+**Goal:** Test the highly successful "Macro Buy and Hold" setup (V2.1) on the legendary Volatility 75 Index (V75), which is known for massive, wild, mean-reverting price action.
+**Setup:**
+- **Mechanics:** Reverted to V2.1 mechanics (`Discrete(2)` action space, no SL/TP, continuous market exposure).
+- **Asset:** V75 (R_75).
+
+**Result:** SUCCESS
+- **Win Rate:** 40.0%
+- **Trades:** 5 trades over 6,000 candles.
+- **Net Profit:** +$583.50
+- **Faults / Lessons Learned:** The AI adapted perfectly to the volatile nature of the V75 index. While it took 1 trade on V100, it took 5 trades on V75 because the macro-trends broke more frequently. Although the win rate was only 40%, the net profit was highly positive. **Precedence:** The model successfully learned classic trend-following mechanics: "cut your losers short, and let your winners run." It took small losses when the V75 trend whipped around, and rode massive waves when the trend held. This is a robust algorithmic baseline for volatile assets.

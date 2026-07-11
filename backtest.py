@@ -9,7 +9,7 @@ from stable_baselines3 import PPO
 STARTING_BALANCE = 10000.0
 TRADE_SIZE = 10  # Number of contracts/units
 SPREAD = 0.5     # Points lost to spread per trade
-WINDOW_SIZE = 30 # AI observation window
+WINDOW_SIZE = 96 # AI observation window
 
 # Load Data
 print("Loading advanced quantitative features...")
@@ -71,65 +71,26 @@ for i in range(WINDOW_SIZE, len(df_test)):
     action, _states = model.predict(obs, deterministic=False) 
     action = action[0]
     
-    TP_POINTS = 50.0
-    SL_POINTS = 20.0
-    
-    trade_closed_automatically = False
-    
-    # 1. Check SL/TP
-    if current_position == 1:
-        unrealized = current_price - entry_price
-        if unrealized >= TP_POINTS or unrealized <= -SL_POINTS:
-            profit = unrealized * TRADE_SIZE - (SPREAD * TRADE_SIZE)
+    # Execute Trades based on AI action
+    if action == 0 and current_position != 1: # Go Long
+        if current_position == 2:
+            profit = (entry_price - current_price) * TRADE_SIZE - (SPREAD * TRADE_SIZE)
             balance += profit
             trades_taken += 1
             if profit > 0: winning_trades += 1
-            current_position = 0
-            trade_closed_automatically = True
-    elif current_position == 2:
-        unrealized = entry_price - current_price
-        if unrealized >= TP_POINTS or unrealized <= -SL_POINTS:
-            profit = unrealized * TRADE_SIZE - (SPREAD * TRADE_SIZE)
+        entry_price = current_price
+        current_position = 1
+        balance -= (SPREAD * TRADE_SIZE) 
+        
+    elif action == 1 and current_position != 2: # Go Short
+        if current_position == 1:
+            profit = (current_price - entry_price) * TRADE_SIZE - (SPREAD * TRADE_SIZE)
             balance += profit
             trades_taken += 1
             if profit > 0: winning_trades += 1
-            current_position = 0
-            trade_closed_automatically = True
-            
-    # 2. Execute AI Action
-    if not trade_closed_automatically:
-        if action == 1 and current_position != 1: # Go Long
-            if current_position == 2:
-                profit = (entry_price - current_price) * TRADE_SIZE - (SPREAD * TRADE_SIZE)
-                balance += profit
-                trades_taken += 1
-                if profit > 0: winning_trades += 1
-            entry_price = current_price
-            current_position = 1
-            balance -= (SPREAD * TRADE_SIZE) 
-            
-        elif action == 2 and current_position != 2: # Go Short
-            if current_position == 1:
-                profit = (current_price - entry_price) * TRADE_SIZE - (SPREAD * TRADE_SIZE)
-                balance += profit
-                trades_taken += 1
-                if profit > 0: winning_trades += 1
-            entry_price = current_price
-            current_position = 2
-            balance -= (SPREAD * TRADE_SIZE)
-            
-        elif action == 0 and current_position != 0: # Close positions and hold flat
-            if current_position == 1:
-                profit = (current_price - entry_price) * TRADE_SIZE - (SPREAD * TRADE_SIZE)
-                balance += profit
-                trades_taken += 1
-                if profit > 0: winning_trades += 1
-            elif current_position == 2:
-                profit = (entry_price - current_price) * TRADE_SIZE - (SPREAD * TRADE_SIZE)
-                balance += profit
-                trades_taken += 1
-                if profit > 0: winning_trades += 1
-            current_position = 0
+        entry_price = current_price
+        current_position = 2
+        balance -= (SPREAD * TRADE_SIZE)
 
 # Force close any open position at the end of the backtest
 if current_position == 1:

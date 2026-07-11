@@ -4,7 +4,7 @@ import websockets
 import pandas as pd
 from datetime import datetime
 
-SYMBOL = 'R_100'
+SYMBOL = 'R_75'
 
 async def download_history():
     uri = "wss://ws.binaryws.com/websockets/v3?app_id=1089" 

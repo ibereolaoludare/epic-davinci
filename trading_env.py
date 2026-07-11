@@ -11,15 +11,15 @@ class DerivTradingEnv(gym.Env):
     """
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, df, window_size=30):
+    def __init__(self, df, window_size=96):
         super(DerivTradingEnv, self).__init__()
         
         self.df = df
         self.window_size = window_size
         self.current_step = self.window_size
         
-        # Actions: 0 = Flat/Close, 1 = Buy, 2 = Sell
-        self.action_space = spaces.Discrete(3)
+        # Actions: 0 = Buy (expect price up), 1 = Sell (expect price down)
+        self.action_space = spaces.Discrete(2)
         
         # Observation space: rolling window of all features
         self.num_features = df.shape[1] 
@@ -50,79 +50,48 @@ class DerivTradingEnv(gym.Env):
         return obs.astype(np.float32)
 
     def step(self, action):
+        horizon = 10
+        future_step = min(self.current_step + horizon, len(self.df) - 1)
+        
         current_price = self.df.iloc[self.current_step]['Close']
         next_price = self.df.iloc[self.current_step + 1]['Close'] if self.current_step < len(self.df) - 1 else current_price
+        future_price = self.df.iloc[future_step]['Close']
         
         reward = 0.0
+        price_change_10 = future_price - current_price
+        price_change_1 = next_price - current_price
         
-        # Hardcoded SL/TP thresholds in points
-        TP_POINTS = 50.0
-        SL_POINTS = 20.0
-        
-        # 1. Check for automatic SL/TP if in a trade
-        trade_closed_automatically = False
-        if self.position == 1:
-            unrealized = current_price - self.entry_price
-            if unrealized >= TP_POINTS:
-                reward = 1.0
-                self.position = 0
-                trade_closed_automatically = True
-            elif unrealized <= -SL_POINTS:
-                reward = -1.0
-                self.position = 0
-                trade_closed_automatically = True
-        elif self.position == -1:
-            unrealized = self.entry_price - current_price
-            if unrealized >= TP_POINTS:
-                reward = 1.0
-                self.position = 0
-                trade_closed_automatically = True
-            elif unrealized <= -SL_POINTS:
-                reward = -1.0
-                self.position = 0
-                trade_closed_automatically = True
+        # Redefined Directional Reward Function (10-Candle Horizon):
+        if action == 0: # Expecting price to go UP over next 10 candles
+            if price_change_10 > 0:
+                reward = 1.0  # Correct prediction
+            else:
+                reward = -1.0 # Incorrect prediction
                 
-        # 2. Process AI Action (if trade didn't close automatically)
-        if not trade_closed_automatically:
-            if self.position == 0:
-                if action == 1: # Go Long
-                    self.position = 1
-                    self.entry_price = current_price
-                elif action == 2: # Go Short
-                    self.position = -1
-                    self.entry_price = current_price
-                elif action == 0: # Stay Flat
-                    reward = 0.0 # Removed boredom penalty to stop thrashing
-            elif self.position == 1:
-                if action == 0: # Close manually
-                    unrealized = current_price - self.entry_price
-                    reward = 1.0 if unrealized > 0 else -1.0
-                    self.position = 0
-                elif action == 2: # Reverse to Short
-                    unrealized = current_price - self.entry_price
-                    reward = 1.0 if unrealized > 0 else -1.0
-                    self.position = -1
-                    self.entry_price = current_price
-                elif action == 1: # Hold Long
-                    reward = 0.0
-            elif self.position == -1:
-                if action == 0: # Close manually
-                    unrealized = self.entry_price - current_price
-                    reward = 1.0 if unrealized > 0 else -1.0
-                    self.position = 0
-                elif action == 1: # Reverse to Long
-                    unrealized = self.entry_price - current_price
-                    reward = 1.0 if unrealized > 0 else -1.0
-                    self.position = 1
-                    self.entry_price = current_price
-                elif action == 2: # Hold Short
-                    reward = 0.0
-                    
+        elif action == 1: # Expecting price to go DOWN over next 10 candles
+            if price_change_10 < 0:
+                reward = 1.0  # Correct prediction
+            else:
+                reward = -1.0 # Incorrect prediction
+                
         # Update step
         self.current_step += 1
         
+        # Simulating account tracking for log/info metrics
+        commission_fee = 0.10
+        if action == 0: # Long
+            if self.position != 1:
+                self.net_worth -= commission_fee
+            self.position = 1
+            self.net_worth += (price_change_1 * 10)
+        elif action == 1: # Short
+            if self.position != -1:
+                self.net_worth -= commission_fee
+            self.position = -1
+            self.net_worth += (-price_change_1 * 10)
+
         # Check if done
-        done = self.current_step >= len(self.df) - 1
+        done = self.current_step >= len(self.df) - horizon - 1
         
         info = {'net_worth': self.net_worth}
         truncated = False
