@@ -44,8 +44,7 @@ print("Normalizing Feature Space...")
 # Distance from EMA (Stationary price proxy)
 df['Dist_EMA_50'] = (df['Close'] - df['EMA_50']) / df['EMA_50']
 
-# Standardize Volume
-df['Volume_Z'] = (df['Volume'] - df['Volume'].rolling(50).mean()) / df['Volume'].rolling(50).std()
+
 
 # Normalize MACD and ATR roughly to keep them bounded
 df['MACD'] = df['MACD'] / df['ATR']
@@ -55,9 +54,7 @@ df['ATR_Norm'] = df['ATR'] / df['Close']
 
 df = df.dropna().reset_index(drop=True)
 
-# DROP RAW ABSOLUTE PRICES TO PREVENT NETWORK WEIGHT COLLAPSE
-print("Dropping unscaled absolute prices...")
-df = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume', 'EMA_50'])
+# We will keep absolute prices in the CSV for reward calculation, but hide them from the NN in trading_env.py
 
 print("Saving advanced quantitative features to 'advanced_features.csv'...")
 df.to_csv('advanced_features.csv', index=False)

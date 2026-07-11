@@ -15,6 +15,9 @@ class DerivTradingEnv(gym.Env):
         super(DerivTradingEnv, self).__init__()
         
         self.df = df
+        
+        # Hide absolute prices from the Neural Network to prevent weight collapse
+        self.feature_cols = [col for col in df.columns if col not in ['Time', 'Open', 'High', 'Low', 'Close', 'EMA_50']]
         self.window_size = window_size
         self.current_step = self.window_size
         
@@ -22,7 +25,7 @@ class DerivTradingEnv(gym.Env):
         self.action_space = spaces.Discrete(2)
         
         # Observation space: rolling window of all features
-        self.num_features = df.shape[1] 
+        self.num_features = len(self.feature_cols)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, 
             shape=(self.window_size, self.num_features), 
@@ -46,7 +49,7 @@ class DerivTradingEnv(gym.Env):
         return self._get_observation(), {}
 
     def _get_observation(self):
-        obs = self.df.iloc[self.current_step - self.window_size:self.current_step].values
+        obs = self.df[self.feature_cols].iloc[self.current_step - self.window_size: self.current_step].values
         return obs.astype(np.float32)
 
     def step(self, action):

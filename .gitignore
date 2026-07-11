@@ -19,3 +19,4 @@ __pycache__/
 # VS Code / IDEs
 .vscode/
 .idea/
+.agents/
