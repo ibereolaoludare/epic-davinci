@@ -22,7 +22,7 @@ if __name__ == "__main__":
     
     # 2. Setup Environment
     # We wrap it in a DummyVecEnv which is required by Stable-Baselines
-    env = DummyVecEnv([lambda: DerivTradingEnv(df=df_train, window_size=30)])
+    env = DummyVecEnv([lambda: DerivTradingEnv(df=df_train, window_size=96)])
     
     # 3. Initialize or Load the AI Brain (PPO)
     if os.path.exists("ppo_deriv_bot.zip"):
