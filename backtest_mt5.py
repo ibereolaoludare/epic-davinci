@@ -48,7 +48,7 @@ if not mt5.login(login, password=password, server=server):
 
 symbol = "Volatility 100 Index"
 print(f"Fetching 30,000 M15 candles for {symbol} from MT5...")
-rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 30000)
+rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 1, 30000)
 
 if rates is None:
     print("Failed to fetch rates from MT5.")

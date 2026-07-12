@@ -23,7 +23,7 @@ print(f"1 lot, 50 point move = ${50 * sym.trade_tick_value / sym.trade_tick_size
 print()
 
 # ── 2. Check actual price scale ───────────────────────────────────────────
-rates = mt5.copy_rates_from_pos('Volatility 100 Index', mt5.TIMEFRAME_M15, 0, 10)
+rates = mt5.copy_rates_from_pos('Volatility 100 Index', mt5.TIMEFRAME_M15, 1, 10)
 df = pd.DataFrame(rates)
 print("=== PRICE SCALE ===")
 print("Sample closes:", df['close'].values)
@@ -35,7 +35,7 @@ print()
 # ── 3. Confidence distribution ────────────────────────────────────────────
 print("=== AI CONFIDENCE AUDIT ===")
 model = PPO.load('v100_crusher_archive/ppo_deriv_bot.zip')
-rates_long = mt5.copy_rates_from_pos('Volatility 100 Index', mt5.TIMEFRAME_M15, 0, 300)
+rates_long = mt5.copy_rates_from_pos('Volatility 100 Index', mt5.TIMEFRAME_M15, 1, 300)
 df_long = pd.DataFrame(rates_long)
 df_long = df_long.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
 df_long['Log_Return'] = np.log(df_long['Close'] / df_long['Close'].shift(1))

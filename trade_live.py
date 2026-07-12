@@ -64,7 +64,7 @@ class DerivMT5Bot:
         self.window_size = 96
         
         # State Tracking
-        self.current_ticket = None
+        self.current_tickets = []
         self.current_direction = None # 0 = UP (Buy), 1 = DOWN (Sell)
         
         logging.info("Loading V100 Crusher Brain...")
@@ -103,6 +103,34 @@ class DerivMT5Bot:
             if self.volume < symbol_info.volume_min:
                 self.volume += step
             logging.info(f"Final operating volume set to: {self.volume} lots")
+            
+        # Sync with existing open positions
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            logging.info(f"Found {len(positions)} existing open position(s) for {self.symbol}.")
+            directions = {pos.type for pos in positions}
+            if len(directions) > 1:
+                logging.warning("Found conflicting open positions (both Buy and Sell). Will close all and start fresh on next signal.")
+                self.current_tickets = [pos.ticket for pos in positions]
+                self.current_direction = None
+            else:
+                self.current_tickets = [pos.ticket for pos in positions]
+                self.current_direction = 0 if positions[0].type == mt5.ORDER_TYPE_BUY else 1
+                direction_str = "Buy (UP)" if self.current_direction == 0 else "Sell (DOWN)"
+                logging.info(f"Synced state: Tracking {len(self.current_tickets)} ticket(s) in {direction_str} direction")
+        else:
+            self.current_tickets = []
+            self.current_direction = None
+            logging.info("No open positions found. Starting fresh.")
+            
+    def close_all_positions(self):
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions:
+            logging.info(f"Closing {len(positions)} existing position(s) for {self.symbol}...")
+            for pos in positions:
+                self.close_position(pos.ticket)
+        self.current_tickets = []
+        self.current_direction = None
 
     def close_position(self, ticket):
         position = mt5.positions_get(ticket=ticket)
@@ -129,17 +157,15 @@ class DerivMT5Bot:
         }
         
         result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
+        if result is None:
+            logging.error(f"Failed to close position {ticket}: order_send returned None (MT5 error code: {mt5.last_error()})")
+        elif result.retcode != mt5.TRADE_RETCODE_DONE:
             logging.error(f"Failed to close position {ticket}: {result.comment}")
         else:
             logging.info(f"Successfully closed position {ticket}.")
 
     def execute_trade(self, action, sl_points, tp_points, volume):
-        if self.current_ticket is not None:
-            logging.info(f"Closing previous position {self.current_ticket}...")
-            self.close_position(self.current_ticket)
-            self.current_ticket = None
-            self.current_direction = None
+        self.close_all_positions()
             
         order_type = mt5.ORDER_TYPE_BUY if action == 0 else mt5.ORDER_TYPE_SELL
         price = mt5.symbol_info_tick(self.symbol).ask if order_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(self.symbol).bid
@@ -169,12 +195,14 @@ class DerivMT5Bot:
         logging.info(f"Executing {'Buy' if action == 0 else 'Sell'} {volume} lots with SL: {sl_points:.1f}, TP: {tp_points:.1f}...")
         result = mt5.order_send(request)
         
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
+        if result is None:
+            logging.error(f"Failed to open position: order_send returned None (MT5 error code: {mt5.last_error()})")
+        elif result.retcode != mt5.TRADE_RETCODE_DONE:
             logging.error(f"Failed to open position: {result.comment} (Retcode: {result.retcode})")
         else:
-            self.current_ticket = result.order
+            self.current_tickets = [result.order]
             self.current_direction = action
-            logging.info(f"Successfully opened position! Ticket: {self.current_ticket}")
+            logging.info(f"Successfully opened position! Ticket: {result.order}")
 
     def run(self):
         self.connect()
@@ -192,8 +220,8 @@ class DerivMT5Bot:
                     logging.info(f"Sleeping for {seconds_to_next} seconds until the next 15m candle closes...")
                     time.sleep(seconds_to_next)
                 
-                logging.info("Fetching last 200 M15 candles from MT5...")
-                rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M15, 0, 200)
+                logging.info("Fetching last 200 M15 candles from MT5 (excluding active candle)...")
+                rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M15, 1, 200)
                 if rates is None or len(rates) < 200:
                     logging.error(f"Failed to fetch rates, got {len(rates) if rates is not None else 0}")
                     time.sleep(10)
@@ -255,13 +283,20 @@ class DerivMT5Bot:
                 else:
                     logging.info(f"Holding current position ({direction_str}).")
                     # Track PnL
-                    if self.current_ticket:
-                        pos = mt5.positions_get(ticket=self.current_ticket)
-                        if pos:
-                            logging.info(f"Current P/L: ${pos[0].profit}")
+                    if self.current_tickets:
+                        positions = mt5.positions_get(symbol=self.symbol)
+                        if positions:
+                            managed_profits = [pos.profit for pos in positions if pos.ticket in self.current_tickets]
+                            if managed_profits:
+                                total_profit = sum(managed_profits)
+                                logging.info(f"Current P/L of {len(managed_profits)} managed position(s): ${total_profit:.2f}")
+                            else:
+                                logging.warning("All managed positions closed externally (TP/SL/Manual). Resetting internal state.")
+                                self.current_tickets = []
+                                self.current_direction = None
                         else:
-                            logging.warning("Position closed externally (TP/SL/Manual). Resetting internal state.")
-                            self.current_ticket = None
+                            logging.warning("All positions closed externally (TP/SL/Manual). Resetting internal state.")
+                            self.current_tickets = []
                             self.current_direction = None
                     
             except Exception as e:
