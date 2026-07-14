@@ -131,6 +131,7 @@ def run_pair_walk_forward(ticker, cfg):
                 'entry_time': times[j],
                 'direction': int(d),
                 'regime': regimes[j],
+                'meta_conf': float(meta_probs[j]),
                 'pips': pips,
                 'win': profit > 0,
             })
