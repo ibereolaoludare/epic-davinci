@@ -9,14 +9,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Data files (you may want to keep these tracked if they're small, but usually good to ignore large csvs)
-# *.csv
-# *.png
+# CatBoost training artifacts
+catboost_info/
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# VS Code / IDEs
+# IDEs
 .vscode/
 .idea/
 .agents/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log

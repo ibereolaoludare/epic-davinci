@@ -1,1 +1,0 @@
-{"iterations": 100, "depth": 4, "learning_rate": 0.1, "l2_leaf_reg": 1, "loss_function": "MultiClass", "eval_metric": "MultiClass", "auto_class_weights": "Balanced", "random_seed": 42, "verbose": 0}

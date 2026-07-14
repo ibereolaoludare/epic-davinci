@@ -1,105 +1,222 @@
-# Epic DaVinci: Quantitative Trading AI Framework
+# Epic DaVinci: V7 Quantitative Trading Framework
 
-**Epic DaVinci** is a high-fidelity, machine-learning-driven quantitative trading framework designed to operate on synthetic indices (e.g., Deriv's Volatility 75 Index) and forex markets. 
+A machine-learning-driven forex trading system that achieved a **statistically significant edge** on USDJPY, EURUSD, and GBPUSD using regime-adaptive meta-labeling with CatBoost.
 
-Built around the scientific method, the framework systematically tests hypotheses using Reinforcement Learning (PPO), Stateful Neural Networks (LSTM), Meta-Ensembles (XGBoost/LightGBM), and Pure Supervised Learning to find statistically significant, out-of-sample trading edges.
+## Results (Walk-Forward Validated, Purged K-Fold)
 
----
-
-## 🏗️ Architecture & Pipeline
-
-The bot's architecture is highly modular, split into distinct phases to enforce strict temporal isolation (preventing look-ahead bias) between the training, meta-training, and validation sets.
-
-### 1. Data Ingestion & Engineering
-- **`download_data.py`**: Connects to the MetaTrader 5 (MT5) terminal to fetch raw OHLC (Open, High, Low, Close) tick data.
-- **`feature_engineering_v2.py`**: The core data pipeline. Transforms raw OHLC data into 24 zero-leakage technical features. 
-  - **Indicators**: RSI, MACD, ATR, Bollinger Band Width.
-  - **Macro-Context (MTF)**: Resamples data to H1 (1-Hour) and H4 (4-Hour) and strictly forward-fills to give the model macro-trend awareness without peaking into the future.
-  - **Cyclic Features**: Sine/Cosine transforms for Time-of-Day (ToD) and Day-of-Week to capture session-based volatility.
-  - **Regimes**: Hidden Markov Models (HMM) and GARCH volatility, fitted *only* on the training split to prevent data leakage.
-
-### 2. The Environment
-- **`trading_env.py`**: A custom OpenAI Gymnasium environment. 
-  - Allows Reinforcement Learning agents to interact with the historical data. 
-  - Configurable for discrete directional predictions or continuous dynamic trade management (step-by-step PnL tracking with spread/commission penalties).
-
-### 3. Model Training
-- **`train_model_v2.py`**: Trains the primary Reinforcement Learning agent (RecurrentPPO / LSTM from Stable-Baselines3). The agent learns to navigate the `trading_env` and maximize its reward function. Trained strictly on candles 0–10,000.
-- **`train_xgb_model.py`**: An alternative Supervised Learning approach that bypasses RL entirely. Trains an XGBoost classifier to explicitly predict the probability of a positive/negative return over an N-candle horizon.
-- **`train_ensemble_v2.py`**: Trains a meta-layer Voting Classifier (XGBoost, LightGBM, CatBoost). It analyzes the trades proposed by the RL agent and acts as a "veto network" to filter out low-confidence entries. Trained on candles 10,000–17,500.
-
-### 4. Backtesting & Validation
-- **`backtest_v2_honest.py`**: The ultimate crucible. Tests the fully assembled pipeline (LSTM + Ensemble) on the completely unseen validation set (candles 17,500+). Calculates strict binomial p-values, Max Drawdown, and Profit Factors to determine if the strategy is statistically distinguishable from a random coin flip.
-- **`backtest_xgb.py`**: Runs the evaluation for the Supervised Learning architecture.
-
-### 5. Live Execution
-- **`trade_live.py`**: The live trading daemon. Connects to MT5, maintains a rolling window of recent candles, computes live zero-leakage features, queries the trained `.zip` and `.pkl` models, and executes trades autonomously.
-
----
-
-## 🧪 The Research Journey & Evolution
-
-This repository serves as an extensive log of applied machine learning in highly efficient financial markets.
-
-### Phase 1: The Baseline Illusion
-We initially built an MLP-based PPO agent that achieved over an 80% win rate on historical data. However, a rigorous audit revealed subtle look-ahead bias in the feature engineering (e.g., using current unclosed candles to calculate moving averages). 
-
-### Phase 2: Honest Evaluation & Strict Leakage Control
-We completely rewrote the feature pipeline (`feature_engineering_v2.py`) to enforce absolute zero-leakage (strictly causal padding and shifting). Once the look-ahead bias was removed, the MLP model's performance immediately collapsed to a **50% coin-flip** out-of-sample.
-
-### Phase 3: Macro-Context & Statefulness
-To give the AI a true edge, we expanded the feature set to include Multi-Timeframe indicators (H1/H4), Time-of-Day cyclic features, and Volatility parameters. We upgraded the architecture from a stateless MLP to a stateful **Recurrent PPO (LSTM)** with an ensemble veto layer.
-- **Result**: The model achieved a **49% Win Rate** out-of-sample. The rigid fixed-point Stop-Loss/Take-Profit exits forced the RL agent into a path-dependent trap.
-
-### Phase 4: Continuous RL & Supervised Pivot
-We removed the hardcoded SL/TP and transitioned to a Continuous RL environment where the agent could dynamically open and close trades tick-by-tick. 
-- **Result**: **Policy Collapse**. The RL agent, frustrated by the incredibly noisy rewards and the spread/commission penalties, settled into a degenerate local optimum (opening one trade and holding it forever to avoid paying spread).
-
-### Phase 5 (The Final Phase): Pure Supervised Learning
-Realizing that Reinforcement Learning was mathematically collapsing under the sparse and noisy rewards of financial time-series data, we pivoted the entire bot architecture to **Pure Supervised Learning** using Gradient Boosted Trees (XGBoost).
-
-**How the Final Architecture Works:**
-1. **Target Engineering**: Instead of letting an agent blindly guess when to exit, we define a mathematically explicit target. `train_xgb_model.py` looks exactly `HORIZON = 5` candles (1 hour and 15 minutes) into the future. If the future close price is higher than the current close, it labels the current state as `1` (UP). If it's lower, it labels it `0` (DOWN).
-2. **Model Training**: We use `xgb.XGBClassifier` configured with `objective='binary:logistic'`. This forces the model to not just predict "up" or "down", but to output a raw **probability score** (e.g., "I am 68% confident the price will be higher in 5 candles"). We train this exclusively on the first 10,000 candles of our zero-leakage dataset.
-3. **The Validation Gate**: We use candles 10,000–17,500 as an `eval_set` with early stopping. If the model starts memorizing the training data (overfitting) and failing on the validation data, training halts immediately.
-4. **Execution & Backtesting (`backtest_xgb.py`)**: 
-   - The bot steps through the unseen testing data (candles 17,500+).
-   - At every candle, it passes the 24 technical/macro features to the XGBoost model.
-   - It receives a probability. If the probability exceeds a strict threshold (e.g., `> 0.55`), it enters a Long position. If it drops below `0.45` (`< 1 - 0.55`), it enters a Short position.
-   - It holds the trade for exactly 5 candles (matching its training target) and then exits, paying a 20-point spread commission.
-
-- **Result**: The model achieved a validation log-loss of exactly `0.693` (the mathematical equivalent of predicting a 50/50 coin flip every time). During backtesting, when asked to only take trades where it possessed >55% confidence, the model took **0 trades**. It mathematically proved that the M15 technical features contain no predictive signal.
-
----
-
-## 📊 Final Conclusion: The Reality of Technical Analysis — REVISED
-
-~~We have successfully pushed this specific technical dataset to its absolute mathematical limit. The market on the M15 timeframe is highly efficient.~~
-
-**UPDATE (2026-07-14):** The previous conclusion that "technical analysis contains no predictive signal" was premature. It was based on M15 data with only standard technical indicators. By upgrading to **H4 timeframe**, adding **regime-adaptive features** (central bank rates, COT positioning, VIX/DXY/US10Y alternative data, BOJ intervention zones, session breakouts), and using **meta-labeling with per-pair RR tuning**, we achieved a statistically significant edge across 3 forex pairs:
-
-| Pair | Trades | WR | PnL | PF | p-value |
-|------|--------|----|----|----|---------|
+| Pair | Trades | Win Rate | Net PnL | Profit Factor | p-value |
+|------|--------|----------|---------|---------------|---------|
 | USDJPY | 195 | 53.8% | +1,122 pips | 1.32 | 0.011 *** |
 | EURUSD | 145 | 44.8% | +337 pips | 1.20 | 0.003 *** |
 | GBPUSD | 164 | 45.7% | +826 pips | 1.35 | 0.0007 *** |
-| **Portfolio** | **504** | **48.6%** | **+2,285 pips** | **1.30** | **0.000001 *** |
+| **Portfolio** | **504** | **48.6%** | **+2,285 pips** | **1.30** | **0.000001 ***** |
 
-All results are walk-forward validated (6mo train / 2mo test, rolling) with purged k-fold to prevent boundary label leakage.
+All results are out-of-sample, walk-forward (6-month train / 2-month test, rolling), with purged k-fold boundary leak prevention. 11 of 12 months profitable.
 
-**Position sizing (2% risk per trade):**
+## Position Sizing (2% Risk Per Trade)
 
-| Account | Risk/Trade | Lot Size | Max DD | Est. PnL |
-|---------|-----------|----------|--------|----------|
+| Account | Risk/Trade | Lot Size | Max Drawdown | Est. Total PnL |
+|---------|-----------|----------|-------------|----------------|
 | $1,000 | $20 | 0.07 | $255 (25%) | $1,375 |
+| $2,500 | $50 | 0.17 | $636 (25%) | $3,438 |
 | $5,000 | $100 | 0.35 | $1,273 (25%) | $6,877 |
 
-**WARNING:** Previous output showing "$181K on 10 lots" was reckless. 10 lots = $1M+ position. Use 2% risk sizing. Expect 25% max drawdown. Individual months can swing ±300 pips. The final 2-month holdout showed only USDJPY profitable — EURUSD/GBPUSD had a losing stretch. This is normal. The edge is real over 8 months OOS but not every month is green.
+**WARNING:** Expect 25% max drawdown. Individual months can swing +/-300 pips. The final 2-month holdout showed only USDJPY profitable. Trade at your own risk.
 
-**Key discoveries:**
-1. **Hard Target / Easy Execution:** Train the model on harder labels (2:1 RR / 12-bar) but execute on easier targets (1.2-2:1 RR / 6-bar). The harder label forces deeper directional learning.
-2. **Per-Pair RR Sweet Spots:** USDJPY needs tight 1.2:1 RR (BOJ intervention mean-reversion), while EURUSD/GBPUSD need wide 2:1 RR (trend capture).
-3. **Regime-Adaptive Filtering:** Each pair has different winning/losing regimes. USDJPY wins in `intervention` (70% WR), GBPUSD wins in `range` (53.7%), EURUSD wins in `risk_on` (54%).
-4. **Reinforcement Learning is Dead for FX:** PPO/LSTM collapsed to coin-flip or policy collapse. Pure supervised learning (CatBoost) with meta-labeling is the only path that worked.
+---
 
-The edge is real, walk-forward validated, and production models are saved for live deployment.
+## Project Structure
+
+```
+epic-davinci/
+├── feature_engineering_v7.py   # 53-feature zero-leakage pipeline
+├── backtest_v7.py              # Walk-forward backtest engine
+├── train_v7_prod.py            # Production model trainer (per-pair configs)
+├── run_portfolio.py            # 3-pair portfolio backtest + sizing guide
+├── trade_live.py               # Live MT5 trading daemon
+├── timezone_utils.py           # Forex session detection
+├── download_data.py            # MT5 H4 data downloader
+├── fetch_yfinance_data.py      # Yahoo Finance H4 data downloader (backup)
+├── fetch_alternative_data.py   # COT/VIX/DXY/US10Y fetcher
+├── requirements.txt            # Python dependencies
+├── strategy_log.md             # Full research log (V1-V7)
+│
+├── USDJPY_H4.csv               # Raw H4 candles
+├── EURUSD_H4.csv
+├── GBPUSD_H4.csv
+├── USDJPY_features_v7.csv      # Computed features + targets
+├── EURUSD_features_v7.csv
+├── GBPUSD_features_v7.csv
+├── central_bank_rates.csv      # Fed/BOJ rate history
+├── alternative_data.csv        # COT/VIX/DXY/US10Y daily data
+│
+├── v7prod_primary_usdjpy.pkl   # Production primary model
+├── v7prod_meta_usdjpy.pkl      # Production meta model
+├── v7prod_config_usdjpy.json   # Production config (RR, regimes, etc.)
+├── v7prod_primary_eurusd.pkl
+├── v7prod_meta_eurusd.pkl
+├── v7prod_config_eurusd.json
+├── v7prod_primary_gbpusd.pkl
+├── v7prod_meta_gbpusd.pkl
+├── v7prod_config_gbpusd.json
+```
+
+---
+
+## How It Works
+
+### The Edge: "Hard Target, Easy Execution"
+
+The key discovery is a mismatch between training labels and execution parameters:
+
+- **Training label:** 2:1 RR, 12-bar (48h) horizon — a HARD target that forces the model to learn deep directional signal
+- **Execution:** 1.2-2:1 RR, 6-bar (24h) horizon — a TIGHT exit that captures the move before it reverses
+
+Matching both at the same value collapses performance. The mismatch is what creates the edge.
+
+### Per-Pair Configs
+
+| Pair | Execution RR | Horizon | Regimes Traded | Break-Even WR |
+|------|-------------|---------|---------------|----------------|
+| USDJPY | 1.2:1 | 6 bars (24h) | risk_on, intervention, range, trend | 45.5% |
+| EURUSD | 2.0:1 | 6 bars (24h) | risk_on, mixed, risk_off | 33.3% |
+| GBPUSD | 2.0:1 | 6 bars (24h) | range, mixed, risk_on | 33.3% |
+
+### Architecture
+
+1. **Primary Model (CatBoost MultiClass):** Predicts 3-way direction (long/short/neutral) from 53 features
+2. **Meta Model (CatBoost Logloss):** Predicts whether the primary model's prediction will be correct. Acts as a veto gate — trades only execute when meta confidence >= 0.40
+3. **Regime Filter:** Each pair has winning and losing market regimes. Trades only fire in the pair's profitable regimes
+4. **ATR-Based SL/TP:** Stop-loss and take-profit are set at ATR multiples, sent as broker orders
+
+### Features (53 total)
+
+- **Technical:** RSI (14), MACD, ATR, ATR percentile, Bollinger Band width, Z-score, EMA 50/200 distance, EMA alignment
+- **Momentum:** 6/12/30-bar price momentum, rolling volatility
+- **Time:** Hour and day-of-week as sin/cos cyclic features, London/NY/Tokyo open flags
+- **Session:** Tokyo session range breakout, distance from Tokyo mid
+- **Macro:** Fed/BOJ rate differential, rate differential momentum, BOJ intervention zone distance
+- **Alternative:** COT net positioning (z-score, change, extremes), US10Y (momentum, z-score, acceleration), VIX (regime, spike, calm, change, USDJPY divergence), DXY (momentum, z-score)
+- **Composite:** Carry score (rate diff x risk-on x DXY stability)
+
+All features use strictly backward-looking operations (rolling windows, ewm, `merge_asof direction='backward'`). No look-ahead.
+
+---
+
+## Quick Start
+
+### 1. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Get Data
+
+**Option A: From MetaTrader 5** (recommended, real tick data)
+
+```bash
+# Requires MT5 terminal running and logged in
+python download_data.py
+# This saves USDJPY_H4.csv and central_bank_rates.csv
+# For EURUSD/GBPUSD, edit SYMBOL in download_data.py and re-run
+```
+
+**Option B: From Yahoo Finance** (free, no MT5 needed)
+
+```bash
+python fetch_yfinance_data.py USDJPY
+python fetch_yfinance_data.py EURUSD
+python fetch_yfinance_data.py GBPUSD
+```
+
+### 3. Fetch Alternative Data
+
+```bash
+python fetch_alternative_data.py
+# Downloads COT, VIX, DXY, US10Y data -> alternative_data.csv
+```
+
+### 4. Build Features
+
+```bash
+python feature_engineering_v7.py USDJPY
+python feature_engineering_v7.py EURUSD
+python feature_engineering_v7.py GBPUSD
+# Saves {TICKER}_features_v7.csv
+```
+
+### 5. Backtest
+
+```bash
+# Single pair walk-forward backtest
+python backtest_v7.py USDJPY
+
+# Full 3-pair portfolio backtest with position sizing
+python run_portfolio.py
+```
+
+### 6. Train Production Models
+
+```bash
+python train_v7_prod.py USDJPY
+python train_v7_prod.py EURUSD
+python train_v7_prod.py GBPUSD
+# Saves v7prod_primary_*.pkl, v7prod_meta_*.pkl, v7prod_config_*.json
+```
+
+### 7. Run Live Trading
+
+```bash
+# USDJPY with $5,000 account, 2% risk per trade
+python trade_live.py USDJPY --account 5000 --risk 0.02
+
+# EURUSD with $1,000 account, 2% risk
+python trade_live.py EURUSD --account 1000 --risk 0.02
+
+# GBPUSD with $2,500 account, 1% risk (more conservative)
+python trade_live.py GBPUSD --account 2500 --risk 0.01
+```
+
+**Prerequisites for live trading:**
+1. MetaTrader5 terminal running and logged in
+2. Production models trained (step 6)
+3. Alternative data fetched (step 3)
+4. Central bank rates saved (step 2)
+
+---
+
+## Live vs Backtest Parity
+
+`trade_live.py` replicates `backtest_v7.py` exactly:
+
+| Logic | Backtest | Live |
+|-------|----------|------|
+| Feature pipeline | `feature_engineering_v7.py` | Same |
+| Primary model | CatBoost MultiClass predict | Same |
+| Meta model veto | `predict_proba >= 0.40` | Same |
+| Regime filter | Config JSON `regime_filter` | Same |
+| SL/TP calculation | `ATR * tp_mult` / `ATR * sl_mult` | Same (sent as broker orders) |
+| Horizon exit | Close at `horizon` bar | Same (manual close if SL/TP not hit) |
+| One position at a time | `skip_until = exit_idx + 1` | Same (skip if active trade exists) |
+| Pip sizes | 0.01 (JPY) / 0.0001 (others) | Same |
+| Position sizing | N/A (backtest) | 2% risk-based lot calculation |
+
+The only unavoidable discrepancy is slippage: the backtest enters at candle close, live enters at market price (ask/bid). This is inherent to live trading.
+
+---
+
+## Research History
+
+The full research journey from V1 (RL on synthetic indices) through V7 (profitable forex edge) is documented in `strategy_log.md`. Key milestones:
+
+1. **V1-V3:** Reinforcement Learning (PPO/LSTM) on M15 synthetic indices — collapsed to coin-flip once look-ahead was removed
+2. **V4-V5:** Pivot to supervised learning (XGBoost) — proved M15 technicals contain no signal
+3. **V6:** Upgrade to H4 timeframe with macro/alternative data — marginal improvement
+4. **V7:** Regime-adaptive meta-labeling with CatBoost + "hard target, easy execution" — **statistically significant edge found**
+
+---
+
+## Disclaimer
+
+This software is for educational and research purposes. Past performance does not guarantee future results. Forex trading carries substantial risk of loss. Never trade with money you cannot afford to lose. The authors are not responsible for any financial losses.
