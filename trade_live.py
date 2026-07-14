@@ -1,313 +1,178 @@
-import MetaTrader5 as mt5
+import time
+import logging
 import pandas as pd
 import numpy as np
-import time
-from datetime import datetime
-from stable_baselines3 import PPO
-import ta
-from arch import arch_model
-from statsmodels.tsa.arima.model import ARIMA
-import warnings
-import logging
+import MetaTrader5 as mt5
+import joblib
+from datetime import datetime, timezone
 import os
+from feature_engineering_v2 import process_features_strict, FEATURE_COLS
+from timezone_utils import to_utc
 
-warnings.filterwarnings("ignore")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Configure Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        logging.FileHandler("bot_execution.log"),
-        logging.StreamHandler()
-    ]
-)
-
-def process_features(df_raw):
-    """Exact identical feature engineering to the V100 Crusher Brain training environment"""
-    df = df_raw.copy()
-    
-    df['Log_Return'] = np.log(df['Close'] / df['Close'].shift(1))
-    df = df.dropna().reset_index(drop=True)
-    
-    returns_scaled = df['Log_Return'] * 100
-    am = arch_model(returns_scaled, vol='Garch', p=1, q=1)
-    res = am.fit(disp='off')
-    df['GARCH_Vol'] = res.conditional_volatility / 100
-    
-    model = ARIMA(df['Log_Return'], order=(1, 0, 1))
-    model_fit = model.fit()
-    df['ARIMA_Resid'] = model_fit.resid
-    
-    df = df.dropna().reset_index(drop=True)
-    
-    # The exact 7 columns the model was trained on, in the exact order:
-    # ['Close', 'High', 'Low', 'Open', 'Log_Return', 'GARCH_Vol', 'ARIMA_Resid']
-    feature_cols = ['Close', 'High', 'Low', 'Open', 'Log_Return', 'GARCH_Vol', 'ARIMA_Resid']
-    
-    return df[feature_cols].values
-
-
-class DerivMT5Bot:
-    def __init__(self):
-        self.login = int(os.getenv("MT5_LOGIN", "32312791"))
-        self.password = os.getenv("MT5_PASSWORD")
-        self.server = os.getenv("MT5_SERVER", "Deriv-Demo")
+class LiveXGBTrader:
+    def __init__(self, symbol="USDJPY", timeframe=mt5.TIMEFRAME_H4, horizon=6, threshold=0.55, volume=1.0):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.horizon = horizon
+        self.threshold = threshold
+        self.volume = volume
         
-        if not self.password:
-            logging.error("MT5_PASSWORD environment variable not set.")
-            raise ValueError("Missing MT5 Password. Please set $env:MT5_PASSWORD in your terminal.")
-            
-        self.symbol = "Volatility 100 Index"
-        # Minimum lot size for Volatility 100 Index is 0.50
-        self.volume = float(os.getenv("MT5_LOT_SIZE", "0.50"))
-        self.window_size = 96
+        logging.info("Loading XGBoost model...")
+        self.model = joblib.load('xgb_model_usdjpy.pkl')
         
-        # State Tracking
-        self.current_tickets = []
-        self.current_direction = None # 0 = UP (Buy), 1 = DOWN (Sell)
-        
-        logging.info("Loading V100 Crusher Brain...")
-        self.model = PPO.load("v100_crusher_archive/ppo_deriv_bot.zip")
+        self.active_trades = [] # List of dicts: {'ticket': id, 'candles_held': 0}
 
     def connect(self):
-        logging.info("Initializing MetaTrader 5...")
         if not mt5.initialize():
-            logging.error(f"MT5 initialize() failed, error code = {mt5.last_error()}")
-            raise Exception("MT5 Initialization Failed")
-            
-        logging.info(f"Logging into MT5 account {self.login} on {self.server}...")
-        authorized = mt5.login(self.login, password=self.password, server=self.server)
+            logging.error("Failed to initialize MT5")
+            raise Exception("MT5 initialization failed")
         
-        if authorized:
-            account_info = mt5.account_info()
-            logging.info(f"Login successful! Balance: ${account_info.balance}")
-        else:
-            logging.error(f"MT5 login failed, error code = {mt5.last_error()}")
-            raise Exception("MT5 Login Failed")
-            
-        # Ensure symbol is available in Market Watch
-        if not mt5.symbol_select(self.symbol, True):
-            logging.error(f"Failed to select symbol {self.symbol}")
-            raise Exception(f"Symbol '{self.symbol}' not found in MT5")
-            
         symbol_info = mt5.symbol_info(self.symbol)
-        if symbol_info:
-            logging.info(f"Symbol specs: Min={symbol_info.volume_min}, Max={symbol_info.volume_max}, Step={symbol_info.volume_step}")
-            if self.volume < symbol_info.volume_min:
-                logging.warning(f"Configured volume {self.volume} is below minimum {symbol_info.volume_min}. Adjusting automatically.")
-                self.volume = symbol_info.volume_min
-            # ensure volume is a multiple of volume_step
-            step = symbol_info.volume_step
-            self.volume = round(round(self.volume / step) * step, 2)
-            if self.volume < symbol_info.volume_min:
-                self.volume += step
-            logging.info(f"Final operating volume set to: {self.volume} lots")
+        if symbol_info is None:
+            logging.error(f"Symbol {self.symbol} not found")
+            raise Exception(f"Symbol {self.symbol} not found")
             
-        # Sync with existing open positions
-        positions = mt5.positions_get(symbol=self.symbol)
-        if positions:
-            logging.info(f"Found {len(positions)} existing open position(s) for {self.symbol}.")
-            directions = {pos.type for pos in positions}
-            if len(directions) > 1:
-                logging.warning("Found conflicting open positions (both Buy and Sell). Will close all and start fresh on next signal.")
-                self.current_tickets = [pos.ticket for pos in positions]
-                self.current_direction = None
-            else:
-                self.current_tickets = [pos.ticket for pos in positions]
-                self.current_direction = 0 if positions[0].type == mt5.ORDER_TYPE_BUY else 1
-                direction_str = "Buy (UP)" if self.current_direction == 0 else "Sell (DOWN)"
-                logging.info(f"Synced state: Tracking {len(self.current_tickets)} ticket(s) in {direction_str} direction")
-        else:
-            self.current_tickets = []
-            self.current_direction = None
-            logging.info("No open positions found. Starting fresh.")
-            
-    def close_all_positions(self):
-        positions = mt5.positions_get(symbol=self.symbol)
-        if positions:
-            logging.info(f"Closing {len(positions)} existing position(s) for {self.symbol}...")
-            for pos in positions:
-                self.close_position(pos.ticket)
-        self.current_tickets = []
-        self.current_direction = None
+        if not symbol_info.visible:
+            logging.info(f"Symbol {self.symbol} is not visible, making it visible.")
+            if not mt5.symbol_select(self.symbol, True):
+                logging.error(f"Failed to select symbol {self.symbol}")
+                raise Exception(f"Failed to select symbol {self.symbol}")
+                
+        logging.info(f"Successfully connected to MT5. Trading {self.symbol}.")
 
     def close_position(self, ticket):
         position = mt5.positions_get(ticket=ticket)
-        if not position:
-            logging.warning(f"Position {ticket} not found or already closed.")
+        if position is None or len(position) == 0:
+            logging.warning(f"Position {ticket} not found. Maybe hit SL/TP?")
             return
             
-        pos = position[0]
-        close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
-        price = mt5.symbol_info_tick(self.symbol).bid if close_type == mt5.ORDER_TYPE_SELL else mt5.symbol_info_tick(self.symbol).ask
+        position = position[0]
+        action = mt5.ORDER_TYPE_SELL if position.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        price = mt5.symbol_info_tick(self.symbol).bid if action == mt5.ORDER_TYPE_SELL else mt5.symbol_info_tick(self.symbol).ask
         
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": self.symbol,
-            "volume": pos.volume,
-            "type": close_type,
-            "position": ticket,
+            "volume": position.volume,
+            "type": action,
+            "position": position.ticket,
             "price": price,
             "deviation": 20,
-            "magic": 1023,
-            "comment": "AI Bot Close",
+            "magic": 234000,
+            "comment": "XGB Horizon Exit",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_FOK,
+            "type_filling": mt5.ORDER_FILLING_IOC,
         }
         
         result = mt5.order_send(request)
-        if result is None:
-            logging.error(f"Failed to close position {ticket}: order_send returned None (MT5 error code: {mt5.last_error()})")
-        elif result.retcode != mt5.TRADE_RETCODE_DONE:
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
             logging.error(f"Failed to close position {ticket}: {result.comment}")
         else:
             logging.info(f"Successfully closed position {ticket}.")
 
-    def execute_trade(self, action, sl_points, tp_points, volume):
-        self.close_all_positions()
-            
-        order_type = mt5.ORDER_TYPE_BUY if action == 0 else mt5.ORDER_TYPE_SELL
-        price = mt5.symbol_info_tick(self.symbol).ask if order_type == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(self.symbol).bid
-        
-        if order_type == mt5.ORDER_TYPE_BUY:
-            sl = price - sl_points
-            tp = price + tp_points
-        else:
-            sl = price + sl_points
-            tp = price - tp_points
+    def execute_trade(self, direction):
+        action = mt5.ORDER_TYPE_BUY if direction == 1 else mt5.ORDER_TYPE_SELL
+        price = mt5.symbol_info_tick(self.symbol).ask if action == mt5.ORDER_TYPE_BUY else mt5.symbol_info_tick(self.symbol).bid
         
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": self.symbol,
-            "volume": volume,
-            "type": order_type,
+            "volume": self.volume,
+            "type": action,
             "price": price,
-            "sl": sl,
-            "tp": tp,
             "deviation": 20,
-            "magic": 1023,
-            "comment": "AI Bot Open",
+            "magic": 234000,
+            "comment": "XGB Entry",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_FOK,
+            "type_filling": mt5.ORDER_FILLING_IOC,
         }
         
-        logging.info(f"Executing {'Buy' if action == 0 else 'Sell'} {volume} lots with SL: {sl_points:.1f}, TP: {tp_points:.1f}...")
         result = mt5.order_send(request)
-        
-        if result is None:
-            logging.error(f"Failed to open position: order_send returned None (MT5 error code: {mt5.last_error()})")
-        elif result.retcode != mt5.TRADE_RETCODE_DONE:
-            logging.error(f"Failed to open position: {result.comment} (Retcode: {result.retcode})")
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            logging.error(f"Failed to open position: {result.comment}")
         else:
-            self.current_tickets = [result.order]
-            self.current_direction = action
             logging.info(f"Successfully opened position! Ticket: {result.order}")
+            self.active_trades.append({'ticket': result.order, 'candles_held': 0})
 
     def run(self):
         self.connect()
-        first_run = True
+        logging.info(f"Starting Live Daemon. Waiting for H4 candle closes...")
         
         while True:
             try:
+                # Naive wait loop for H4 (wait until top of 4th hour)
                 now = datetime.now()
-                minutes_to_next = 15 - (now.minute % 15)
-                seconds_to_next = (minutes_to_next * 60) - now.second
-                
-                if first_run:
-                    first_run = False
+                # On H4, candle closes are typically 00:00, 04:00, 08:00, 12:00, 16:00, 20:00
+                hours_to_next = 4 - (now.hour % 4)
+                if hours_to_next == 4 and now.minute == 0 and now.second == 0:
+                    pass # We are exactly at the top of the hour
                 else:
-                    logging.info(f"Sleeping for {seconds_to_next} seconds until the next 15m candle closes...")
+                    minutes_to_next = (hours_to_next * 60) - now.minute - 1
+                    seconds_to_next = (minutes_to_next * 60) + (60 - now.second) + 2
+                    logging.info(f"Sleeping {seconds_to_next} seconds until next H4 candle close...")
                     time.sleep(seconds_to_next)
                 
-                logging.info("Fetching last 200 M15 candles from MT5 (excluding active candle)...")
-                rates = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_M15, 1, 200)
+                # Manage active trades
+                trades_to_keep = []
+                for trade in self.active_trades:
+                    trade['candles_held'] += 1
+                    if trade['candles_held'] >= self.horizon:
+                        logging.info(f"Trade {trade['ticket']} reached horizon of {self.horizon} candles. Closing...")
+                        self.close_position(trade['ticket'])
+                    else:
+                        trades_to_keep.append(trade)
+                self.active_trades = trades_to_keep
+
+                logging.info("Fetching recent H4 candles...")
+                rates = mt5.copy_rates_from_pos(self.symbol, self.timeframe, 1, 500)
                 if rates is None or len(rates) < 200:
-                    logging.error(f"Failed to fetch rates, got {len(rates) if rates is not None else 0}")
-                    time.sleep(10)
+                    logging.error("Failed to fetch enough rates.")
+                    time.sleep(60)
                     continue
                     
                 df = pd.DataFrame(rates)
                 df['time'] = pd.to_datetime(df['time'], unit='s')
                 df = df.rename(columns={'time': 'Time', 'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'})
                 
-                try:
-                    features_matrix = process_features(df)
-                except Exception as e:
-                    logging.error(f"Feature processing error: {e}")
-                    time.sleep(10)
+                features_df = process_features_strict(df)
+                if features_df.empty:
                     continue
                     
-                if len(features_matrix) < self.window_size:
-                    logging.warning(f"Not enough data to form {self.window_size} window. Got {len(features_matrix)}.")
-                    time.sleep(10)
+                latest_row = features_df.iloc[-1]
+                
+                # --- PRE-TRADE CHECKS & ALERTS ---
+                # 1. MoF Intervention Danger Zone Alert
+                if latest_row['In_Intervention_Zone'] == 1:
+                    logging.critical("🚨 ALERT: USD/JPY IS WITHIN 0.5% OF MoF INTERVENTION LEVEL (¥160.0). EXTREME VOLATILITY RISK. 🚨")
+                    
+                # 2. Macro Release Circuit Breaker
+                # Suppress trades if a high-impact release is within 12 hours (0.5 days)
+                if latest_row['Days_To_Next_Release'] < 0.5:
+                    logging.warning(f"CIRCUIT BREAKER: Macro release is in {latest_row['Days_To_Next_Release']*24:.1f} hours. Suppressing entries.")
                     continue
-                    
-                obs = features_matrix[-self.window_size:]
+                # ----------------------------------
                 
-                # Get AI action — NOTE: This model is always ~99.9% decisive.
-                # Confidence thresholding has no effect and is intentionally omitted.
-                action, _ = self.model.predict(obs, deterministic=True)
-                action = int(action)
+                # Extract features for XGBoost
+                obs = latest_row[[c for c in FEATURE_COLS if c in features_df.columns]].values.reshape(1, -1)
                 
-                direction_str = "Buy (UP)" if action == 0 else "Sell (DOWN)"
-                logging.info(f"AI Prediction: {direction_str}")
+                prob = self.model.predict_proba(obs)[0][1]
+                logging.info(f"XGBoost UP Probability: {prob*100:.1f}%")
                 
-                # SL/TP are used as catastrophic safety nets only.
-                # Primary exits are triggered by the AI flipping direction.
-                sl_points = float(os.getenv("MT5_SL_POINTS", "60.0"))
-                tp_points = float(os.getenv("MT5_TP_POINTS", "60.0"))
-                
-                # --- PROPORTIONAL EQUITY SCALING ---
-                # If MT5_COMPOUND=True, lot size scales proportionally with
-                # account equity so profits compound as the account grows.
-                # This is honest compounding — no broken SL-based Kelly formula.
-                compound = os.getenv("MT5_COMPOUND", "False").lower() == "true"
-                if compound:
-                    account_info = mt5.account_info()
-                    current_balance = account_info.balance
-                    starting_balance = float(os.getenv("MT5_STARTING_BALANCE", "10000.0"))
-                    scale_factor = current_balance / starting_balance
-                    symbol_info = mt5.symbol_info(self.symbol)
-                    step = symbol_info.volume_step
-                    raw_volume = self.volume * scale_factor
-                    final_volume = round(round(raw_volume / step) * step, 2)
-                    final_volume = max(symbol_info.volume_min, min(symbol_info.volume_max, final_volume))
-                    logging.info(f"Compound Mode: Balance=${current_balance:.2f}, Scale={scale_factor:.3f}x, Volume={final_volume}")
+                if prob >= self.threshold:
+                    logging.info("Probability > Threshold! Executing LONG.")
+                    self.execute_trade(1)
+                elif prob <= (1 - self.threshold):
+                    logging.info("Probability < (1 - Threshold)! Executing SHORT.")
+                    self.execute_trade(-1)
                 else:
-                    final_volume = self.volume
-                
-                if self.current_direction != action:
-                    logging.info(f"Signal flipped! Triggering trade execution...")
-                    self.execute_trade(action, sl_points, tp_points, final_volume)
-                else:
-                    logging.info(f"Holding current position ({direction_str}).")
-                    # Track PnL
-                    if self.current_tickets:
-                        positions = mt5.positions_get(symbol=self.symbol)
-                        if positions:
-                            managed_profits = [pos.profit for pos in positions if pos.ticket in self.current_tickets]
-                            if managed_profits:
-                                total_profit = sum(managed_profits)
-                                logging.info(f"Current P/L of {len(managed_profits)} managed position(s): ${total_profit:.2f}")
-                            else:
-                                logging.warning("All managed positions closed externally (TP/SL/Manual). Resetting internal state.")
-                                self.current_tickets = []
-                                self.current_direction = None
-                        else:
-                            logging.warning("All positions closed externally (TP/SL/Manual). Resetting internal state.")
-                            self.current_tickets = []
-                            self.current_direction = None
-                    
+                    logging.info("No trade triggered (low confidence).")
+
             except Exception as e:
-                logging.error(f"Strategy loop error: {e}")
-                time.sleep(10)
+                logging.error(f"Error in main loop: {e}")
+                time.sleep(60)
 
 if __name__ == "__main__":
-    bot = DerivMT5Bot()
-    try:
-        bot.run()
-    except KeyboardInterrupt:
-        logging.info("Bot stopped by user.")
-    finally:
-        mt5.shutdown()
+    bot = LiveXGBTrader(symbol="USDJPY", timeframe=mt5.TIMEFRAME_H4, horizon=6, threshold=0.55, volume=1.0)
+    bot.run()

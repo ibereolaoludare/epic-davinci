@@ -6,8 +6,8 @@ from trading_env import DerivTradingEnv
 import os
 
 if __name__ == "__main__":
-    print("Loading advanced quantitative features...")
-    df = pd.read_csv('advanced_features.csv')
+    print("Loading advanced quantitative features (STRICT ZERO-LEAKAGE DATASET)...")
+    df = pd.read_csv('advanced_features_strict.csv')
     
     # Drop Time column for the AI
     df = df.drop(columns=['Time'], errors='ignore')
@@ -25,13 +25,9 @@ if __name__ == "__main__":
     env = DummyVecEnv([lambda: DerivTradingEnv(df=df_train, window_size=96)])
     
     # 3. Initialize or Load the AI Brain (PPO)
-    if os.path.exists("ppo_deriv_bot.zip"):
-        print("Loading existing PPO Neural Network...")
-        model = PPO.load("ppo_deriv_bot", env=env, verbose=1, learning_rate=0.00005, ent_coef=0.0001, batch_size=128, device="auto")
-    else:
-        print("Initializing new PPO Neural Network...")
-        # Using 'MlpPolicy' since our data is tabular numeric data
-        model = PPO("MlpPolicy", env, verbose=1, learning_rate=0.00005, ent_coef=0.0001, batch_size=128, device="auto")
+    print("Initializing brand new PPO Neural Network from scratch to ensure a clean slate...")
+    # Using 'MlpPolicy' since our data is tabular numeric data
+    model = PPO("MlpPolicy", env, verbose=1, learning_rate=0.00005, ent_coef=0.0001, batch_size=128, device="auto")
     
     # 4. Train the AI
     print("Starting Training! This is where your CPU/GPU works hard...")
@@ -41,4 +37,4 @@ if __name__ == "__main__":
     print("Training complete. Saving AI brain to 'ppo_deriv_bot'...")
     model.save("ppo_deriv_bot")
     
-    print("Successfully saved! You can now run backtest.py")
+    print("Successfully saved! You can now run backtests.")

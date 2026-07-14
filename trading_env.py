@@ -2,29 +2,30 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pandas as pd
+from timezone_utils import get_session
 
-class DerivTradingEnv(gym.Env):
+class USDJPYTradingEnv(gym.Env):
     """
-    Custom Environment that follows gymnasium interface.
-    This simulates directional prediction rewards instead of broker PnL
-    to prevent policy collapse.
+    Custom Environment for USDJPY H4.
+    Simulates dynamic position management with spread and swap costs.
     """
     metadata = {'render_modes': ['human']}
 
     def __init__(self, df, window_size=96):
-        super(DerivTradingEnv, self).__init__()
+        super(USDJPYTradingEnv, self).__init__()
         
         self.df = df
-        
-        # Hide absolute prices from the Neural Network to prevent weight collapse
-        self.feature_cols = [col for col in df.columns if col not in ['Time', 'Open', 'High', 'Low', 'Close', 'EMA_50']]
+        # Force time to UTC
+        if 'Time' in self.df.columns:
+            self.df['Time'] = pd.to_datetime(self.df['Time'], utc=True)
+            
+        self.feature_cols = [col for col in df.columns if col not in ['Time', 'Open', 'High', 'Low', 'Close', 'KF_Close', 'EMA_50']]
         self.window_size = window_size
         self.current_step = self.window_size
         
-        # Actions: 0 = Buy (expect price up), 1 = Sell (expect price down)
-        self.action_space = spaces.Discrete(2)
+        # Actions: 0 = Short, 1 = Flat, 2 = Long
+        self.action_space = spaces.Discrete(3)
         
-        # Observation space: rolling window of all features
         self.num_features = len(self.feature_cols)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, 
@@ -32,20 +33,14 @@ class DerivTradingEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Simulated accounting for metric tracking
-        self.balance = 1000.0
-        self.net_worth = self.balance
-        self.position = 0      # 1: long, -1: short
-        self.entry_price = 0.0
+        self.position = 0
+        self.entry_step = 0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.current_step = self.window_size
-        self.balance = 1000.0
-        self.net_worth = self.balance
         self.position = 0
-        self.entry_price = 0.0
-        
+        self.entry_step = 0
         return self._get_observation(), {}
 
     def _get_observation(self):
@@ -53,53 +48,50 @@ class DerivTradingEnv(gym.Env):
         return obs.astype(np.float32)
 
     def step(self, action):
-        horizon = 10
-        future_step = min(self.current_step + horizon, len(self.df) - 1)
-        
         current_price = self.df.iloc[self.current_step]['Close']
+        current_time = self.df.iloc[self.current_step]['Time']
+        
         next_price = self.df.iloc[self.current_step + 1]['Close'] if self.current_step < len(self.df) - 1 else current_price
-        future_price = self.df.iloc[future_step]['Close']
+        
+        step_pnl = next_price - current_price
+        target_position = action - 1
         
         reward = 0.0
-        price_change_10 = future_price - current_price
-        price_change_1 = next_price - current_price
         
-        # Redefined Directional Reward Function (10-Candle Horizon):
-        if action == 0: # Expecting price to go UP over next 10 candles
-            if price_change_10 > 0:
-                reward = 1.0  # Correct prediction
-            else:
-                reward = -1.0 # Incorrect prediction
-                
-        elif action == 1: # Expecting price to go DOWN over next 10 candles
-            if price_change_10 < 0:
-                reward = 1.0  # Correct prediction
-            else:
-                reward = -1.0 # Incorrect prediction
-                
-        # Update step
+        # Calculate Variable Spread & Swap Cost
+        session = get_session(current_time)
+        spread_pips = 0.5 if session in ['London', 'NY', 'London/NY Overlap'] else 1.5
+        spread_cost = spread_pips * 0.01
+        
+        # 0.2 pips per day swap cost (0.2 * 0.01). On H4, one step = 4 hours = 1/6 of a day.
+        swap_cost_per_step = (0.2 / 6.0) * 0.01
+        
+        if target_position != self.position:
+            # Pay spread on entry
+            reward -= spread_cost
+            self.entry_step = self.current_step
+            
+        if target_position != 0:
+            # Pay swap for holding over this step
+            reward -= swap_cost_per_step
+            
+        if target_position == 1:
+            reward += step_pnl
+        elif target_position == -1:
+            reward -= step_pnl
+            
+        current_atr = self.df.iloc[self.current_step]['ATR']
+        if pd.isna(current_atr) or current_atr <= 0:
+            current_atr = 1.0 # Fallback for USDJPY
+            
+        reward = float(reward / current_atr)
+        reward = max(-5.0, min(5.0, reward))
+        
+        self.position = target_position
         self.current_step += 1
         
-        # Simulating account tracking for log/info metrics
-        commission_fee = 0.10
-        if action == 0: # Long
-            if self.position != 1:
-                self.net_worth -= commission_fee
-            self.position = 1
-            self.net_worth += (price_change_1 * 10)
-        elif action == 1: # Short
-            if self.position != -1:
-                self.net_worth -= commission_fee
-            self.position = -1
-            self.net_worth += (-price_change_1 * 10)
-
-        # Check if done
-        done = self.current_step >= len(self.df) - horizon - 1
-        
-        info = {'net_worth': self.net_worth}
-        truncated = False
-        
-        return self._get_observation(), float(reward), done, truncated, info
+        done = self.current_step >= len(self.df) - 1
+        return self._get_observation(), float(reward), done, False, {}
 
     def render(self):
-        print(f'Step: {self.current_step}, Net Worth: {self.net_worth:.2f}, Position: {self.position}')
+        pass
