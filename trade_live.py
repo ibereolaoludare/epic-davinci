@@ -105,9 +105,10 @@ class LiveV7Trader:
                      f"Symbol: {self.ticker} | Digits: {info.digits}")
 
     def fetch_candles(self, n=500):
-        df = pd.DataFrame(
-            self.mt5.copy_rates_from_pos(self.ticker, self.mt5.TIMEFRAME_H4, 1, n)
-        )
+        rates = self.mt5.copy_rates_from_pos(self.ticker, self.mt5.TIMEFRAME_H4, 1, n)
+        if rates is None or len(rates) == 0:
+            return pd.DataFrame()
+        df = pd.DataFrame(rates)
         if df.empty:
             return df
         df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
@@ -127,15 +128,18 @@ class LiveV7Trader:
         X = feat_row[self.feature_cols].values.reshape(1, -1)
         X_df = pd.DataFrame(X, columns=self.feature_cols)
 
-        direction = self.primary.predict(X_df)[0]
+        # CatBoost MultiClass predict returns shape (1,1) array — flatten
+        # to match backtest_v7.py exactly: .flatten().astype(float)[0]
+        direction = int(self.primary.predict(X_df).flatten().astype(float)[0])
         if direction == 0:
             return 0, 0.0, None
 
         X_meta = X_df.copy()
         X_meta['Primary_Pred'] = float(direction)
-        meta_prob = self.meta.predict_proba(X_meta)[0, 1]
+        meta_prob = float(self.meta.predict_proba(X_meta)[0, 1])
 
-        return int(direction), float(meta_prob), feat_row.get('Regime', 'mixed')
+        regime = feat_row['Regime'] if 'Regime' in feat_row.index else 'mixed'
+        return direction, meta_prob, regime
 
     def calc_sl_tp(self, entry_price, atr, direction):
         if direction == 1:
@@ -283,13 +287,13 @@ class LiveV7Trader:
                     continue
 
                 latest = feat_df.iloc[-1]
-                atr = latest.get('ATR', 0)
+                atr = float(latest['ATR']) if 'ATR' in feat_df.columns else 0.0
                 if atr <= 0 or np.isnan(atr):
-                    log.warning("ATR is zero/NaN, skipping")
+                    log.warning(f"ATR is zero/NaN ({atr}), skipping")
                     continue
 
                 direction, meta_conf, regime = self.get_signal(latest)
-                close_price = latest.get('Close', 0)
+                close_price = float(latest['Close']) if 'Close' in feat_df.columns else 0.0
 
                 log.info(f"Signal: dir={direction} meta={meta_conf:.3f} "
                          f"regime={regime} ATR={atr:.5f} close={close_price:.5f}")

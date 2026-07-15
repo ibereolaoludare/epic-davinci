@@ -42,7 +42,7 @@ def _session_utc(hour):
 
 def process_features_v7(df_raw, alt_df=None, rates_df=None):
     df = df_raw.copy()
-    df['Time'] = pd.to_datetime(df['Time'], utc=True)
+    df['Time'] = pd.to_datetime(df['Time'], utc=True).astype('datetime64[ns, UTC]')
     df = df.sort_values('Time').reset_index(drop=True)
 
     # ========================
@@ -161,7 +161,7 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None):
     if rates_df is None:
         try:
             rates_df = pd.read_csv("central_bank_rates.csv")
-            rates_df['date'] = pd.to_datetime(rates_df['date'], utc=True)
+            rates_df['date'] = pd.to_datetime(rates_df['date'], utc=True).astype('datetime64[ns, UTC]')
         except FileNotFoundError:
             rates_df = pd.DataFrame()
 
@@ -191,7 +191,7 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None):
     if alt_df is None:
         try:
             alt_df = pd.read_csv("alternative_data.csv")
-            alt_df['date'] = pd.to_datetime(alt_df['date'], utc=True)
+            alt_df['date'] = pd.to_datetime(alt_df['date'], utc=True).astype('datetime64[ns, UTC]')
             alt_df = alt_df.sort_values('date')
         except FileNotFoundError:
             alt_df = pd.DataFrame()
