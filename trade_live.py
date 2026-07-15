@@ -150,6 +150,22 @@ class LiveV7Trader:
             tp = entry_price - (atr * self.tp_mult)
         return sl, tp
 
+    def _get_filling_mode(self):
+        """Detect the broker's supported filling mode for this symbol."""
+        mt5 = self.mt5
+        info = mt5.symbol_info(self.ticker)
+        # Filling mode flags from symbol_info.filling_mode:
+        #   bit 0 (1) = ORDER_FILLING_FOK supported
+        #   bit 1 (2) = ORDER_FILLING_IOC supported
+        #   ORDER_FILLING_RETURN is always available for non-market orders
+        fm = info.filling_mode
+        if fm & 1:
+            return mt5.ORDER_FILLING_FOK
+        elif fm & 2:
+            return mt5.ORDER_FILLING_IOC
+        else:
+            return mt5.ORDER_FILLING_RETURN
+
     def execute_trade(self, direction, sl_price, tp_price, lot):
         mt5 = self.mt5
         tick = mt5.symbol_info_tick(self.ticker)
@@ -162,6 +178,7 @@ class LiveV7Trader:
             price = tick.bid
 
         digits = mt5.symbol_info(self.ticker).digits
+        filling = self._get_filling_mode()
         request = {
             'action': mt5.TRADE_ACTION_DEAL,
             'symbol': self.ticker,
@@ -174,13 +191,22 @@ class LiveV7Trader:
             'magic': 234000,
             'comment': f'V7 {int(self.tp_mult*10)}x{int(self.sl_mult*10)}',
             'type_time': mt5.ORDER_TIME_GTC,
-            'type_filling': mt5.ORDER_FILLING_IOC,
+            'type_filling': filling,
         }
 
         result = mt5.order_send(request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             log.error(f"Order failed: {result.comment} (retcode={result.retcode})")
-            return None
+            # If filling mode still rejected, try RETURN as fallback
+            if result.retcode == 10030 and filling != mt5.ORDER_FILLING_RETURN:
+                log.info("Retrying with ORDER_FILLING_RETURN...")
+                request['type_filling'] = mt5.ORDER_FILLING_RETURN
+                result = mt5.order_send(request)
+                if result.retcode != mt5.TRADE_RETCODE_DONE:
+                    log.error(f"Retry failed: {result.comment} (retcode={result.retcode})")
+                    return None
+            else:
+                return None
 
         log.info(f"OPENED {('LONG' if direction==1 else 'SHORT')} "
                  f"{lot} lots @ {price:.{digits}f} | "
@@ -211,13 +237,18 @@ class LiveV7Trader:
             'magic': 234000,
             'comment': f'V7 {reason}',
             'type_time': mt5.ORDER_TIME_GTC,
-            'type_filling': mt5.ORDER_FILLING_IOC,
+            'type_filling': self._get_filling_mode(),
         }
 
         result = mt5.order_send(request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
-            log.error(f"Close failed: {result.comment}")
-            return False
+            # Retry with RETURN filling if unsupported
+            if result.retcode == 10030:
+                request['type_filling'] = mt5.ORDER_FILLING_RETURN
+                result = mt5.order_send(request)
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                log.error(f"Close failed: {result.comment} (retcode={result.retcode})")
+                return False
 
         log.info(f"CLOSED ticket {ticket} ({reason}) @ {price:.5f}")
         return True
