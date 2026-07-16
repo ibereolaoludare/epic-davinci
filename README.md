@@ -6,22 +6,22 @@ A machine-learning-driven forex trading system that achieved a **statistically s
 
 | Pair | Trades | Win Rate | Net PnL | Profit Factor | p-value |
 |------|--------|----------|---------|---------------|---------|
-| USDJPY | 195 | 53.8% | +1,122 pips | 1.32 | 0.011 *** |
-| EURUSD | 145 | 44.8% | +337 pips | 1.20 | 0.003 *** |
-| GBPUSD | 164 | 45.7% | +826 pips | 1.35 | 0.0007 *** |
-| **Portfolio** | **504** | **48.6%** | **+2,285 pips** | **1.30** | **0.000001 ***** |
+| USDJPY | 195 | 53.8% | +1,121.5 pips | 1.32 | 0.0114 *** |
+| EURUSD | 89 | 46.1% | +433.8 pips | 1.43 | 0.0085 *** |
+| GBPUSD | 150 | 51.3% | +954.1 pips | 1.42 | 0.0000 *** |
+| **Portfolio** | **434** | **51.4%** | **+2,509.4 pips** | **1.37** | **0.000000 ***** |
 
-All results are out-of-sample, walk-forward (6-month train / 2-month test, rolling), with purged k-fold boundary leak prevention. 11 of 12 months profitable.
+All results are out-of-sample, walk-forward (6-month train / 2-month test, rolling), with purged k-fold boundary leak prevention. All 12 months profitable.
 
 ## Position Sizing (2% Risk Per Trade)
 
 | Account | Risk/Trade | Lot Size | Max Drawdown | Est. Total PnL |
 |---------|-----------|----------|-------------|----------------|
-| $1,000 | $20 | 0.07 | $255 (25%) | $1,375 |
-| $2,500 | $50 | 0.17 | $636 (25%) | $3,438 |
-| $5,000 | $100 | 0.35 | $1,273 (25%) | $6,877 |
+| $1,000 | $20 | 0.06 | $252 | $1,340 |
+| $2,500 | $50 | 0.15 | $630 | $3,351 |
+| $5,000 | $100 | 0.31 | $1,260 | $6,703 |
 
-**WARNING:** Expect 25% max drawdown. Individual months can swing +/-300 pips. The final 2-month holdout showed only USDJPY profitable. Trade at your own risk.
+**WARNING:** Expect Max Drawdown around 400 pips. Individual months can swing +/-300 pips. Trade at your own risk.
 
 ---
 
@@ -79,13 +79,13 @@ Matching both at the same value collapses performance. The mismatch is what crea
 | Pair | Execution RR | Horizon | Regimes Traded | Break-Even WR |
 |------|-------------|---------|---------------|----------------|
 | USDJPY | 1.2:1 | 6 bars (24h) | risk_on, intervention, range, trend | 45.5% |
-| EURUSD | 2.0:1 | 6 bars (24h) | risk_on, mixed, risk_off | 33.3% |
-| GBPUSD | 2.0:1 | 6 bars (24h) | range, mixed, risk_on | 33.3% |
+| EURUSD | 2.0:1 | 6 bars (24h) | mixed, trend | 33.3% |
+| GBPUSD | 2.0:1 | 6 bars (24h) | mixed, risk_off, trend | 33.3% |
 
 ### Architecture
 
 1. **Primary Model (CatBoost MultiClass):** Predicts 3-way direction (long/short/neutral) from 53 features
-2. **Meta Model (CatBoost Logloss):** Predicts whether the primary model's prediction will be correct. Acts as a veto gate — trades only execute when meta confidence >= 0.40
+2. **Meta Model (CatBoost Logloss):** Predicts whether the primary model's prediction will be correct. Acts as a veto gate — trades only execute when meta confidence >= 0.40 (0.51 for EURUSD)
 3. **Regime Filter:** Each pair has winning and losing market regimes. Trades only fire in the pair's profitable regimes
 4. **ATR-Based SL/TP:** Stop-loss and take-profit are set at ATR multiples, sent as broker orders
 

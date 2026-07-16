@@ -143,7 +143,7 @@ class LiveV7Trader:
         return df[['Time', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
     def compute_features(self, df):
-        feat_df = process_features_v7(df)
+        feat_df = process_features_v7(df, ticker=self.ticker)
         if feat_df.empty:
             return None
         return feat_df

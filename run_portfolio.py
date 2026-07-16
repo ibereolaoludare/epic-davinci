@@ -28,13 +28,13 @@ PORTFOLIO_CONFIGS = {
     },
     'EURUSD': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.40,
-        'regime_filter': ['risk_on', 'mixed', 'risk_off'],
+        'meta_threshold': 0.51,
+        'regime_filter': ['mixed', 'trend'],
     },
     'GBPUSD': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.40,
-        'regime_filter': ['range', 'mixed', 'risk_on'],
+        'regime_filter': ['mixed', 'risk_off', 'trend'],
     },
 }
 

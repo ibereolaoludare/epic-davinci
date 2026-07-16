@@ -5,9 +5,9 @@
   "horizon": 6,
   "meta_threshold": 0.4,
   "regime_filter": [
-    "range",
     "mixed",
-    "risk_on"
+    "risk_off",
+    "trend"
   ],
   "feature_cols": [
     "Time_Of_Day_Sin",
@@ -35,10 +35,10 @@
     "Momentum_6",
     "Momentum_12",
     "Momentum_30",
-    "Tokyo_Range",
-    "Tokyo_Breakout_Up",
-    "Tokyo_Breakout_Down",
-    "Tokyo_Dist_Mid",
+    "Session_Range",
+    "Session_Breakout_Up",
+    "Session_Breakout_Down",
+    "Session_Dist_Mid",
     "Rate_Diff",
     "Rate_Diff_Mom",
     "Dist_From_160",

@@ -23,8 +23,9 @@ warnings.filterwarnings('ignore')
 EXCLUDE_COLS = ['Target', 'Meta_Label', 'Primary_Pred',
                 'Time', 'Open', 'High', 'Low', 'Close', 'Volume',
                 'EMA_50', 'EMA_200', 'Hour', 'DayOfWeek',
-                'MACD_Signal', 'Returns', 'Tokyo_High', 'Tokyo_Low',
-                'Tokyo_Complete_Time']
+                'MACD_Signal', 'Returns', 'Session_High', 'Session_Low',
+                'Session_Complete_Time', 'date', 'date_x', 'date_y', 
+                'fed_rate', 'boj_rate', 'ecb_rate', 'boe_rate']
 
 
 def _session_utc(hour):
@@ -40,7 +41,7 @@ def _session_utc(hour):
         return 'Offhours'
 
 
-def process_features_v7(df_raw, alt_df=None, rates_df=None):
+def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     df = df_raw.copy()
     df['Time'] = pd.to_datetime(df['Time'], utc=True).astype('datetime64[ns, UTC]')
     df = df.sort_values('Time').reset_index(drop=True)
@@ -114,46 +115,51 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None):
     df['Momentum_30'] = df['Close'].pct_change(30) * 100  # 5-day momentum
 
     # ========================
-    # 3. TOKYO SESSION RANGE BREAKOUT (ZERO-LEAKAGE)
+    # 3. SESSION RANGE BREAKOUT (PAIR-AWARE)
     # ========================
-    # On H4, Tokyo session = 00:00 and 04:00 UTC candles.
-    # The range is only COMPLETE after the 04:00 candle closes (at 08:00).
-    # So we assign the range to the 08:00 candle and forward-fill.
-    # Candles at 00:00 and 04:00 get the PREVIOUS day's range. No look-ahead.
+    if ticker == 'USDJPY':
+        # On H4, Tokyo session = 00:00 and 04:00 UTC candles. Complete at 08:00.
+        target_hours = [0, 4]
+        complete_hour = 8
+    else:
+        # On H4, London/NY overlap = 08:00 and 12:00 UTC candles. Complete at 16:00.
+        target_hours = [8, 12]
+        complete_hour = 16
+
     df['Date'] = df['Time'].dt.date
-    df['Is_Tokyo_Session'] = df['Hour'].isin([0, 4]).astype(int)
+    df['Is_Target_Session'] = df['Hour'].isin(target_hours).astype(int)
 
-    tokyo = df[df['Is_Tokyo_Session'] == 1].groupby('Date').agg(
-        Tokyo_High=('High', 'max'),
-        Tokyo_Low=('Low', 'min')
+    session_df = df[df['Is_Target_Session'] == 1].groupby('Date').agg(
+        Session_High=('High', 'max'),
+        Session_Low=('Low', 'min')
     ).reset_index()
-    tokyo['Date'] = pd.to_datetime(tokyo['Date'])
+    session_df['Date'] = pd.to_datetime(session_df['Date'])
 
-    # Assign Tokyo range to the 08:00 candle of the SAME day (when range is complete)
-    df['Tokyo_Complete_Time'] = df.apply(
-        lambda r: pd.Timestamp(r['Date']) + pd.Timedelta(hours=8)
-        if r['Hour'] == 8 else pd.NaT, axis=1
+    # Assign session range to the completion candle of the SAME day
+    df['Session_Complete_Time'] = df.apply(
+        lambda r: pd.Timestamp(r['Date']) + pd.Timedelta(hours=complete_hour)
+        if r['Hour'] == complete_hour else pd.NaT, axis=1
     )
-    tokyo['Tokyo_Complete_Time'] = tokyo['Date'] + pd.Timedelta(hours=8)
+    session_df['Session_Complete_Time'] = session_df['Date'] + pd.Timedelta(hours=complete_hour)
 
-    df = df.merge(tokyo[['Tokyo_Complete_Time', 'Tokyo_High', 'Tokyo_Low']],
-                  on='Tokyo_Complete_Time', how='left', suffixes=('', '_new'))
+    df = df.merge(session_df[['Session_Complete_Time', 'Session_High', 'Session_Low']],
+                  on='Session_Complete_Time', how='left', suffixes=('', '_new'))
 
-    # Forward-fill: candles before 08:00 get previous day's range
-    df['Tokyo_High'] = df['Tokyo_High'].ffill()
-    df['Tokyo_Low'] = df['Tokyo_Low'].ffill()
-    df['Tokyo_Range'] = (df['Tokyo_High'] - df['Tokyo_Low']) / df['ATR'].replace(0, np.nan)
-    df['Tokyo_Range'] = df['Tokyo_Range'].fillna(0)
+    # Forward-fill: candles before complete get previous day's range
+    df['Session_High'] = df['Session_High'].ffill()
+    df['Session_Low'] = df['Session_Low'].ffill()
+    df['Session_Range'] = (df['Session_High'] - df['Session_Low']) / df['ATR'].replace(0, np.nan)
+    df['Session_Range'] = df['Session_Range'].fillna(0)
 
-    # Breakout direction: where is current close relative to PREVIOUS completed Tokyo range?
-    df['Tokyo_Breakout_Up'] = (df['Close'] > df['Tokyo_High']).astype(int)
-    df['Tokyo_Breakout_Down'] = (df['Close'] < df['Tokyo_Low']).astype(int)
+    # Breakout direction: where is current close relative to PREVIOUS completed range?
+    df['Session_Breakout_Up'] = (df['Close'] > df['Session_High']).astype(int)
+    df['Session_Breakout_Down'] = (df['Close'] < df['Session_Low']).astype(int)
 
-    tokyo_mid = (df['Tokyo_High'] + df['Tokyo_Low']) / 2
-    df['Tokyo_Dist_Mid'] = (df['Close'] - tokyo_mid) / df['ATR'].replace(0, np.nan)
-    df['Tokyo_Dist_Mid'] = df['Tokyo_Dist_Mid'].fillna(0)
+    session_mid = (df['Session_High'] + df['Session_Low']) / 2
+    df['Session_Dist_Mid'] = (df['Close'] - session_mid) / df['ATR'].replace(0, np.nan)
+    df['Session_Dist_Mid'] = df['Session_Dist_Mid'].fillna(0)
 
-    df = df.drop(columns=['Date', 'Is_Tokyo_Session', 'Tokyo_Complete_Time'])
+    df = df.drop(columns=['Date', 'Is_Target_Session', 'Session_Complete_Time'])
 
     # ========================
     # 4. CENTRAL BANK RATES (backward merge)
@@ -167,23 +173,38 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None):
 
     if not rates_df.empty:
         rates_df = rates_df.sort_values('date')
-        df = pd.merge_asof(df.sort_values('Time'), rates_df[['date', 'fed_rate', 'boj_rate']],
+        cols_to_merge = ['date', 'fed_rate', 'boj_rate']
+        if 'ecb_rate' in rates_df.columns:
+            cols_to_merge.extend(['ecb_rate', 'boe_rate'])
+        
+        df = pd.merge_asof(df.sort_values('Time'), rates_df[cols_to_merge],
                            left_on='Time', right_on='date', direction='backward')
-        df['Rate_Diff'] = df['fed_rate'] - df['boj_rate']
-        df = df.drop(columns=['date', 'fed_rate', 'boj_rate'])
-        df['Rate_Diff'] = df['Rate_Diff'].fillna(0)
-        df['Rate_Diff_Mom'] = df['Rate_Diff'] - df['Rate_Diff'].shift(90)
-        df['Rate_Diff_Mom'] = df['Rate_Diff_Mom'].fillna(0)
+                           
+        if ticker == 'USDJPY':
+            df['Rate_Diff'] = df['fed_rate'] - df['boj_rate']
+        elif ticker == 'EURUSD':
+            df['Rate_Diff'] = df.get('ecb_rate', 0) - df['fed_rate']
+        elif ticker == 'GBPUSD':
+            df['Rate_Diff'] = df.get('boe_rate', 0) - df['fed_rate']
+        else:
+            df['Rate_Diff'] = 0.0
+            
+        df['Rate_Diff_Mom'] = df['Rate_Diff'].diff(30).fillna(0)
     else:
         df['Rate_Diff'], df['Rate_Diff_Mom'] = 0.0, 0.0
 
     # ========================
     # 5. INTERVENTION ZONE FEATURES
     # ========================
-    # BOJ historically intervenes near 160.000
-    df['Dist_From_160'] = (df['Close'] - 160.0) / df['ATR']
-    df['In_Intervention_Zone'] = (df['Close'] > 159.0).astype(int)
-    df['Past_Intervention_Level'] = (df['Close'] > 157.0).astype(int)
+    if ticker == 'USDJPY':
+        # BOJ historically intervenes near 160.000
+        df['Dist_From_160'] = (df['Close'] - 160.0) / df['ATR']
+        df['In_Intervention_Zone'] = (df['Close'] > 159.0).astype(int)
+        df['Past_Intervention_Level'] = (df['Close'] > 157.0).astype(int)
+    else:
+        df['Dist_From_160'] = 0.0
+        df['In_Intervention_Zone'] = 0
+        df['Past_Intervention_Level'] = 0
 
     # ========================
     # 6. ALTERNATIVE DATA (backward merge)
@@ -202,7 +223,7 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None):
         df = df.drop(columns=['date'], errors='ignore')
 
         # --- COT Features ---
-        if 'COT_Net' in df.columns:
+        if 'COT_Net' in df.columns and ticker == 'USDJPY':
             df['COT_Net_Z'] = (df['COT_Net'] - df['COT_Net'].rolling(window=260, min_periods=30).mean()) / \
                                df['COT_Net'].rolling(window=260, min_periods=30).std()
             df['COT_Net_Z'] = df['COT_Net_Z'].fillna(0)
@@ -264,9 +285,9 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None):
         df['VIX'] = 15
 
     # ========================
-    # 7. CARRY SCORE (USDJPY-specific composite)
+    # 7. CARRY SCORE (Universal)
     # ========================
-    # Carry trade favors USDJPY long when: rate diff positive + VIX calm + DXY stable
+    # Carry trade favors going long when: rate diff positive + VIX calm + DXY stable
     risk_on = (1 - df['VIX_Regime']) * (df['Rate_Diff'] > 0).astype(float)
     df['Carry_Score'] = df['Rate_Diff'] * risk_on * (1 - np.abs(df['DXY_Z_20d']) / 3)
     df['Carry_Score'] = df['Carry_Score'].fillna(0)
@@ -394,7 +415,7 @@ if __name__ == "__main__":
     print(f"Building V7 feature set for {ticker}...")
     try:
         df_raw = pd.read_csv(f"{ticker}_H4.csv")
-        df = process_features_v7(df_raw)
+        df = process_features_v7(df_raw, ticker=ticker)
         out_csv = f"{ticker}_features_v7.csv"
         df.to_csv(out_csv, index=False)
 
