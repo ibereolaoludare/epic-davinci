@@ -13,9 +13,9 @@ Executes trades using the EXACT same logic as backtest_v7.py:
   9. Risk-based lot sizing: 2% of account per trade
 
 Usage:
-  python trade_live.py USDJPY --account 5000 --risk 0.02
-  python trade_live.py EURUSD --account 1000 --risk 0.02
-  python trade_live.py GBPUSD --account 2500 --risk 0.02
+  python trade_live.py USDJPY --risk 0.02
+  python trade_live.py EURUSD --risk 0.02
+  python trade_live.py GBPUSD --risk 0.02
 
 Prerequisites:
   - MetaTrader5 terminal running and logged in
@@ -60,10 +60,10 @@ def calc_lot_size(account_balance, risk_pct, sl_pips, pip_value_per_lot):
 
 
 class LiveV7Trader:
-    def __init__(self, ticker, account_balance, risk_pct=0.02):
+    def __init__(self, ticker, risk_pct=0.02):
         self.ticker = ticker
         self.risk_pct = risk_pct
-        self.account_balance = account_balance
+        self.account_balance = 0.0  # Will be populated by connect()
         self.pip_size = 0.01 if ticker.endswith('JPY') else 0.0001
         self.pip_value_per_lot = 6.67 if ticker.endswith('JPY') else 10.0
 
@@ -78,7 +78,7 @@ class LiveV7Trader:
 
         log.info(f"Config: {self.tp_mult}:1 RR, H={self.horizon}, "
                  f"regimes={self.regime_filter}, meta>={self.meta_thresh}")
-        log.info(f"Account: ${account_balance} | Risk: {risk_pct*100}%/trade")
+        log.info(f"Risk: {risk_pct*100}%/trade (Balance will be fetched from MT5)")
 
         self.mt5 = None
         self.active_trade = None
@@ -103,6 +103,30 @@ class LiveV7Trader:
             self.account_balance = acc.balance
             log.info(f"Connected. Account: ${acc.balance:.2f} | "
                      f"Symbol: {self.ticker} | Digits: {info.digits}")
+
+        # Reconcile existing open positions
+        positions = mt5.positions_get(symbol=self.ticker)
+        if positions:
+            for pos in positions:
+                if pos.magic == 234000:
+                    direction = 1 if pos.type == mt5.ORDER_TYPE_BUY else -1
+                    open_time = datetime.fromtimestamp(pos.time, tz=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    candles_held = int((now - open_time).total_seconds() / 3600 // 4)
+                    
+                    self.active_trade = {
+                        'ticket': pos.ticket,
+                        'candles_held': candles_held,
+                        'direction': direction,
+                        'entry_price': pos.price_open,
+                        'sl_price': pos.sl,
+                        'tp_price': pos.tp,
+                        'lot': pos.volume,
+                    }
+                    log.info(f"Recovered existing active trade: Ticket={pos.ticket}, "
+                             f"Dir={'LONG' if direction==1 else 'SHORT'}, "
+                             f"Volume={pos.volume}, Held approx {candles_held} bars.")
+                    break
 
     def fetch_candles(self, n=500):
         rates = self.mt5.copy_rates_from_pos(self.ticker, self.mt5.TIMEFRAME_H4, 1, n)
@@ -283,32 +307,43 @@ class LiveV7Trader:
         log.info(f"Starting V7 live daemon for {self.ticker}. "
                  f"Waiting for H4 candle closes...")
 
+        last_processed_time = None
+
         while True:
             try:
                 now = datetime.now(timezone.utc)
-                hours_to_next = 4 - (now.hour % 4)
-                if hours_to_next == 4 and now.minute == 0:
-                    hours_to_next = 0
-
-                minutes_to_next = (hours_to_next * 60) - now.minute
-                seconds_to_next = (minutes_to_next * 60) - now.second + 2
+                # If we are within the first 2 minutes of a new H4 block, process immediately
+                if now.hour % 4 == 0 and now.minute < 2:
+                    seconds_to_next = 0
+                else:
+                    next_hour = ((now.hour // 4) + 1) * 4
+                    target = now.replace(minute=0, second=2, microsecond=0) + timedelta(hours=(next_hour - now.hour))
+                    seconds_to_next = (target - now).total_seconds()
 
                 if seconds_to_next > 0:
-                    log.info(f"Next H4 close in {seconds_to_next//60}m{seconds_to_next%60}s. "
+                    log.info(f"Next H4 close in {int(seconds_to_next)//60}m{int(seconds_to_next)%60}s. "
                              f"Sleeping...")
                     time.sleep(seconds_to_next)
-
-                self.manage_active_trade()
-
-                if self.active_trade:
-                    log.info("Position active, skipping new entry.")
-                    continue
 
                 log.info("Fetching H4 candles...")
                 df = self.fetch_candles(500)
                 if len(df) < 200:
                     log.error(f"Only {len(df)} candles, need 200+")
                     time.sleep(60)
+                    continue
+
+                latest_time = df.iloc[-1]['Time']
+                if last_processed_time == latest_time:
+                    log.info("Candle not updated yet (or already processed), sleeping 60s...")
+                    time.sleep(60)
+                    continue
+                
+                last_processed_time = latest_time
+
+                self.manage_active_trade()
+
+                if self.active_trade:
+                    log.info("Position active, skipping new entry.")
                     continue
 
                 log.info("Computing V7 features...")
@@ -385,9 +420,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python trade_live.py USDJPY --account 5000
-  python trade_live.py EURUSD --account 1000 --risk 0.02
-  python trade_live.py GBPUSD --account 2500 --risk 0.01
+  python trade_live.py USDJPY
+  python trade_live.py EURUSD --risk 0.02
+  python trade_live.py GBPUSD --risk 0.01
 
 Prerequisites:
   1. MetaTrader5 terminal running and logged in
@@ -403,13 +438,11 @@ Prerequisites:
     parser.add_argument('ticker', type=str,
                         choices=['USDJPY', 'EURUSD', 'GBPUSD'],
                         help='Trading symbol')
-    parser.add_argument('--account', type=float, default=5000,
-                        help='Account balance in USD (for lot sizing)')
     parser.add_argument('--risk', type=float, default=0.02,
                         help='Risk per trade as fraction (0.02 = 2%%)')
     args = parser.parse_args()
 
-    trader = LiveV7Trader(args.ticker, args.account, args.risk)
+    trader = LiveV7Trader(args.ticker, args.risk)
     trader.run()
 
 
