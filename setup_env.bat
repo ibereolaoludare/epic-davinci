@@ -37,6 +37,23 @@ if errorlevel 1 (
     echo Python 3.12 is already installed.
 )
 
+:: Ensure MSVC++ Redistributable is installed (required for NumPy/C-extensions)
+echo Checking for MSVC++ Redistributable...
+if not exist "%SystemRoot%\System32\vcruntime140.dll" (
+    echo vcruntime140.dll not found. Downloading MSVC++ Redistributable...
+    powershell -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile 'vc_redist.x64.exe'"
+    if not errorlevel 1 (
+        echo Installing MSVC++ Redistributable...
+        start /wait vc_redist.x64.exe /quiet /norestart
+        del vc_redist.x64.exe
+        echo MSVC++ Redistributable installed.
+    ) else (
+        echo WARNING: Failed to download MSVC++ Redistributable. NumPy might fail to import.
+    )
+) else (
+    echo MSVC++ Redistributable is already present.
+)
+
 :: Create virtual environment if it doesn't exist
 if not exist "venv" (
     echo Creating virtual environment with Python 3.12...
