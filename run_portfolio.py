@@ -254,7 +254,7 @@ def main():
     print(f"  {'Account':>10s} | {'Risk/Trade':>10s} | {'Lot Size':>10s} | {'Max DD $':>10s} | {'Est. Total PnL':>15s}")
     print(f"  {'-'*10}-+-{'-'*10}-+-{'-'*10}-+-{'-'*10}-+-{'-'*15}")
 
-    for account_size in [1000, 2500, 5000]:
+    for account_size in [1000, 2500, 5000, 8000]:
         risk_pct = 0.02  # 2% risk per trade
         risk_per_trade = account_size * risk_pct
         # Use the worst-case (highest) pip value among traded pairs for safety
