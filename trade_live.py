@@ -28,6 +28,10 @@ import time
 import logging
 import json
 import argparse
+import threading
+import os
+import subprocess
+import sys
 import pandas as pd
 import numpy as np
 import joblib
@@ -52,11 +56,32 @@ def load_config(ticker):
     return cfg, primary, meta
 
 
-def calc_lot_size(account_balance, risk_pct, sl_pips, pip_value_per_lot):
+def calc_lot_size(account_balance, risk_pct, sl_pips, pip_value_per_lot, info=None):
+    """
+    Quantize lot size using broker's volume_step and enforce strict risk limits.
+    Prevents blowing risk rules on small accounts.
+    """
     risk_amount = account_balance * risk_pct
-    lot = risk_amount / (sl_pips * pip_value_per_lot)
-    lot = max(0.01, round(lot, 2))
-    return lot
+    raw_lot = risk_amount / (sl_pips * pip_value_per_lot)
+    
+    step = info.volume_step if (info and hasattr(info, 'volume_step') and info.volume_step > 0) else 0.01
+    min_lot = info.volume_min if (info and hasattr(info, 'volume_min') and info.volume_min > 0) else 0.01
+    max_lot = info.volume_max if (info and hasattr(info, 'volume_max') and info.volume_max > 0) else 100.0
+
+    # Quantize downward to nearest volume step
+    lot = np.floor(raw_lot / step) * step
+
+    if lot < min_lot:
+        # Check if broker minimum lot would cause excessive risk (> 1.5x of risk target)
+        actual_risk_pct = (min_lot * sl_pips * pip_value_per_lot) / account_balance if account_balance > 0 else 0
+        if actual_risk_pct > (risk_pct * 1.5):
+            log.warning(f"Calculated lot ({raw_lot:.4f}) is below broker min ({min_lot}). "
+                        f"Min lot would risk {actual_risk_pct*100:.1f}% (> target {risk_pct*100:.1f}%). Trade skipped.")
+            return 0.0
+        lot = min_lot
+
+    lot = min(max_lot, lot)
+    return round(lot, 2)
 
 
 class LiveV7Trader:
@@ -82,6 +107,55 @@ class LiveV7Trader:
 
         self.mt5 = None
         self.active_trade = None
+        self.broker_utc_offset = timedelta(hours=0)
+
+    def get_pip_value(self):
+        """Calculate dynamic real-time pip value per standard lot from live market price / MT5."""
+        if self.mt5:
+            info = self.mt5.symbol_info(self.ticker)
+            if info and info.trade_tick_value > 0 and info.trade_tick_size > 0:
+                return (info.trade_tick_value / info.trade_tick_size) * self.pip_size
+        if self.ticker.endswith('JPY'):
+            tick = self.mt5.symbol_info_tick(self.ticker) if self.mt5 else None
+            price = tick.bid if (tick and tick.bid > 0) else 155.0
+            return (100000.0 * 0.01) / price
+        return 10.0
+
+    def check_portfolio_usd_exposure(self, proposed_direction):
+        """
+        Safeguard: Prevents opening excessive simultaneous trades in the same USD direction.
+        Long USDJPY / Short EURUSD / Short GBPUSD = +1 Long USD exposure.
+        Short USDJPY / Long EURUSD / Long GBPUSD = -1 Short USD exposure.
+        """
+        if not self.mt5:
+            return True
+        positions = self.mt5.positions_get()
+        if not positions:
+            return True
+            
+        usd_exposure = 0
+        for pos in positions:
+            if pos.magic == 234000:
+                sym = pos.symbol
+                is_buy = (pos.type == self.mt5.ORDER_TYPE_BUY)
+                if sym.endswith('JPY'):
+                    usd_exposure += 1 if is_buy else -1
+                else:  # EURUSD, GBPUSD (USD is quote currency)
+                    usd_exposure += -1 if is_buy else 1
+                    
+        # Calculate proposed new exposure for this trade
+        if self.ticker.endswith('JPY'):
+            new_exp = 1 if proposed_direction == 1 else -1
+        else:
+            new_exp = -1 if proposed_direction == 1 else 1
+            
+        total_exp = usd_exposure + new_exp
+        MAX_USD_EXPOSURE = 3  # Uncapped mode: Allows all 3 pairs to trade simultaneously
+        if abs(total_exp) > MAX_USD_EXPOSURE:
+            log.warning(f"Portfolio USD Exposure Cap reached (Current={usd_exposure}, Proposed={new_exp}, Max={MAX_USD_EXPOSURE}). "
+                        f"Skipping trade to prevent correlated USD drawdown.")
+            return False
+        return True
 
     def connect(self):
         import MetaTrader5 as mt5
@@ -104,13 +178,22 @@ class LiveV7Trader:
             log.info(f"Connected. Account: ${acc.balance:.2f} | "
                      f"Symbol: {self.ticker} | Digits: {info.digits}")
 
+        # Auto-detect broker server time offset relative to true UTC
+        tick = mt5.symbol_info_tick(self.ticker)
+        if tick:
+            server_time = datetime.fromtimestamp(tick.time, tz=timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            offset_hours = round((server_time - now_utc).total_seconds() / 3600)
+            self.broker_utc_offset = timedelta(hours=offset_hours)
+            log.info(f"Broker server time offset detected: {offset_hours:+d}h relative to UTC")
+
         # Reconcile existing open positions
         positions = mt5.positions_get(symbol=self.ticker)
         if positions:
             for pos in positions:
                 if pos.magic == 234000:
                     direction = 1 if pos.type == mt5.ORDER_TYPE_BUY else -1
-                    open_time = datetime.fromtimestamp(pos.time, tz=timezone.utc)
+                    open_time = datetime.fromtimestamp(pos.time, tz=timezone.utc) - self.broker_utc_offset
                     now = datetime.now(timezone.utc)
                     candles_held = int((now - open_time).total_seconds() / 3600 // 4)
                     
@@ -128,14 +211,37 @@ class LiveV7Trader:
                              f"Volume={pos.volume}, Held approx {candles_held} bars.")
                     break
 
-    def fetch_candles(self, n=500):
+    def refresh_alternative_data_if_needed(self):
+        alt_file = "alternative_data.csv"
+        # Auto-refresh on background thread if missing or older than 12 hours
+        if not os.path.exists(alt_file) or (time.time() - os.path.getmtime(alt_file)) > 43200:
+            def _worker():
+                log.info("Background thread: Refreshing alternative macro data (VIX, US10Y, DXY, COT)...")
+                try:
+                    subprocess.run([sys.executable, "fetch_alternative_data.py"], check=False)
+                    log.info("Background thread: Macro data refresh complete.")
+                except Exception as e:
+                    log.warning(f"Background thread: Macro refresh failed: {e}")
+            threading.Thread(target=_worker, daemon=True).start()
+
+    def fetch_candles(self, n=1000):
+        # Auto-reconnect if terminal disconnected
+        if not self.mt5 or not self.mt5.terminal_info():
+            log.warning("MT5 terminal connection lost. Reconnecting...")
+            try:
+                self.connect()
+            except Exception as e:
+                log.error(f"Reconnection failed: {e}")
+                return pd.DataFrame()
+
         rates = self.mt5.copy_rates_from_pos(self.ticker, self.mt5.TIMEFRAME_H4, 1, n)
         if rates is None or len(rates) == 0:
             return pd.DataFrame()
         df = pd.DataFrame(rates)
         if df.empty:
             return df
-        df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+        # Convert to true UTC by adjusting for broker server offset
+        df['time'] = pd.to_datetime(df['time'], unit='s', utc=True) - self.broker_utc_offset
         df = df.rename(columns={
             'time': 'Time', 'open': 'Open', 'high': 'High',
             'low': 'Low', 'close': 'Close', 'tick_volume': 'Volume',
@@ -211,7 +317,7 @@ class LiveV7Trader:
             'price': price,
             'sl': round(sl_price, digits),
             'tp': round(tp_price, digits),
-            'deviation': 20,
+            'deviation': 50,
             'magic': 234000,
             'comment': f'V7 {int(self.tp_mult*10)}x{int(self.sl_mult*10)}',
             'type_time': mt5.ORDER_TIME_GTC,
@@ -257,7 +363,7 @@ class LiveV7Trader:
             'type': close_type,
             'position': pos.ticket,
             'price': price,
-            'deviation': 20,
+            'deviation': 50,
             'magic': 234000,
             'comment': f'V7 {reason}',
             'type_time': mt5.ORDER_TIME_GTC,
@@ -287,13 +393,23 @@ class LiveV7Trader:
         mt5 = self.mt5
         positions = mt5.positions_get(ticket=trade['ticket'])
         if not positions:
-            profit_pips = trade.get('profit_pips', 0)
             log.info(f"Trade {trade['ticket']} closed by SL/TP after "
                      f"{trade['candles_held']} bars")
             self.active_trade = None
             return
 
         if trade['candles_held'] >= self.horizon:
+            # Rollover spread protection: check current spread before market close
+            tick = mt5.symbol_info_tick(self.ticker)
+            current_spread = (tick.ask - tick.bid) / self.pip_size if tick else 1.0
+            now_hour = datetime.now(timezone.utc).hour
+            
+            # If during daily rollover (21:00-22:00 UTC) with wide spread, defer market exit briefly
+            if (21 <= now_hour <= 22 or current_spread > 3.5) and trade['candles_held'] == self.horizon:
+                log.warning(f"Trade {trade['ticket']} reached horizon, but elevated spread ({current_spread:.1f} pips) "
+                            f"or rollover hour detected. Deferring market close until spread normalizes.")
+                return
+
             log.info(f"Trade {trade['ticket']} reached horizon "
                      f"({self.horizon} bars). Closing...")
             self.close_position(trade['ticket'], 'horizon_exit')
@@ -312,6 +428,18 @@ class LiveV7Trader:
         while True:
             try:
                 now = datetime.now(timezone.utc)
+                
+                # Weekend idle check (Forex market closed from Friday 21:00 UTC to Sunday 21:00 UTC)
+                if now.weekday() == 5 or (now.weekday() == 6 and now.hour < 21):
+                    # Calculate seconds until Sunday 21:00 UTC
+                    days_ahead = 6 - now.weekday()
+                    sunday_open = now.replace(hour=21, minute=0, second=2, microsecond=0) + timedelta(days=days_ahead)
+                    sleep_secs = max(60, (sunday_open - now).total_seconds())
+                    log.info(f"Forex market is closed for the weekend. Sleeping {int(sleep_secs)//3600}h "
+                             f"until Sunday 21:00 UTC...")
+                    time.sleep(sleep_secs)
+                    continue
+
                 # If we are within the first 2 minutes of a new H4 block, process immediately
                 if now.hour % 4 == 0 and now.minute < 2:
                     seconds_to_next = 0
@@ -325,8 +453,10 @@ class LiveV7Trader:
                              f"Sleeping...")
                     time.sleep(seconds_to_next)
 
+                self.refresh_alternative_data_if_needed()
+
                 log.info("Fetching H4 candles...")
-                df = self.fetch_candles(500)
+                df = self.fetch_candles(1000)
                 if len(df) < 200:
                     log.error(f"Only {len(df)} candles, need 200+")
                     time.sleep(60)
@@ -378,17 +508,28 @@ class LiveV7Trader:
                              f"{self.regime_filter}, skipping")
                     continue
 
+                # Portfolio-level risk check: ensure we do not over-expose in the same USD direction
+                if not self.check_portfolio_usd_exposure(direction):
+                    continue
+
+                # Query real-time pip value & broker constraints
+                pip_val = self.get_pip_value()
+                info = self.mt5.symbol_info(self.ticker)
                 sl_price, tp_price = self.calc_sl_tp(
                     close_price, atr, direction)
                 sl_pips = abs(close_price - sl_price) / self.pip_size
                 lot = calc_lot_size(
                     self.account_balance, self.risk_pct,
-                    sl_pips, self.pip_value_per_lot)
+                    sl_pips, pip_val, info=info)
+
+                if lot <= 0.0:
+                    log.info("Lot sizing calculated to 0.0 (minimum risk guard). Skipping trade.")
+                    continue
 
                 log.info(f"Entry signal: {('LONG' if direction==1 else 'SHORT')} "
                          f"| SL={sl_pips:.1f} pips | "
                          f"TP={abs(tp_price-close_price)/self.pip_size:.1f} pips | "
-                         f"Lot={lot} | Risk=${self.account_balance*self.risk_pct:.2f}")
+                         f"Lot={lot} | PipVal=${pip_val:.2f} | Risk=${self.account_balance*self.risk_pct:.2f}")
 
                 ticket = self.execute_trade(direction, sl_price, tp_price, lot)
                 if ticket:

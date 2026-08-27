@@ -27,7 +27,7 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-from run_portfolio import PORTFOLIO_CONFIGS, run_pair_walk_forward
+from run_portfolio import PORTFOLIO_CONFIGS, run_pair_walk_forward, apply_portfolio_usd_cap
 
 COLORS = {
     'USDJPY': '#e74c3c',
@@ -58,6 +58,7 @@ def collect_trades(pairs):
         trades = run_pair_walk_forward(pair, cfg)
         per_pair[pair] = trades
         all_trades.extend(trades)
+        
     all_trades.sort(key=lambda t: t['entry_time'])
     return all_trades, per_pair
 

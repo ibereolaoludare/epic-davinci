@@ -126,9 +126,12 @@ def run_pair_walk_forward(ticker, cfg):
             pips = profit / pip_size
             skip_until = exit_idx + 1
 
+            exit_time = times[min(exit_idx, len(times)-1)]
             all_trades.append({
                 'ticker': ticker,
                 'entry_time': times[j],
+                'exit_time': exit_time,
+                'bars_held': bars,
                 'direction': int(d),
                 'regime': regimes[j],
                 'meta_conf': float(meta_probs[j]),
@@ -139,6 +142,38 @@ def run_pair_walk_forward(ticker, cfg):
     return all_trades
 
 
+def apply_portfolio_usd_cap(trades, max_usd_exposure=2):
+    """
+    Filter chronological portfolio trades by the USD directional exposure cap.
+    Long USDJPY / Short EURUSD / Short GBPUSD = +1 Long USD exposure.
+    Short USDJPY / Long EURUSD / Long GBPUSD = -1 Short USD exposure.
+    """
+    sorted_trades = sorted(trades, key=lambda t: t['entry_time'])
+    accepted_trades = []
+    active_positions = []  # list of (exit_time, usd_direction)
+
+    for t in sorted_trades:
+        entry_t = t['entry_time']
+        # Prune positions that have already closed before entry_t
+        active_positions = [p for p in active_positions if p[0] > entry_t]
+
+        # Calculate current net USD exposure
+        current_usd_exp = sum(p[1] for p in active_positions)
+
+        # Proposed trade USD direction
+        if t['ticker'].endswith('JPY'):
+            trade_usd_dir = 1 if t['direction'] == 1 else -1
+        else:
+            trade_usd_dir = -1 if t['direction'] == 1 else 1
+
+        # Check cap
+        if abs(current_usd_exp + trade_usd_dir) <= max_usd_exposure:
+            accepted_trades.append(t)
+            active_positions.append((t['exit_time'], trade_usd_dir))
+
+    return accepted_trades
+
+
 def main():
     pairs = sys.argv[1:] if len(sys.argv) > 1 else ['USDJPY', 'EURUSD', 'GBPUSD']
 
@@ -146,7 +181,7 @@ def main():
     print("PORTFOLIO WALK-FORWARD BACKTEST (V7)")
     print("=" * 75)
 
-    all_trades = []
+    all_raw_trades = []
     per_pair = {}
 
     for pair in pairs:
@@ -158,7 +193,7 @@ def main():
               f"regimes={cfg['regime_filter']} ---")
         trades = run_pair_walk_forward(pair, cfg)
         per_pair[pair] = trades
-        all_trades.extend(trades)
+        all_raw_trades.extend(trades)
 
         n = len(trades)
         if n > 0:
@@ -174,9 +209,12 @@ def main():
                   f"PnL={pnl:.1f} | PF={pf:.2f} | p={p_val:.4f} "
                   f"{'***' if p_val < 0.05 else ''}")
 
+    # By default, run uncapped (all 3 pairs allowed simultaneously)
+    all_trades = all_raw_trades
+
     # --- Portfolio Aggregation ---
     print("\n" + "=" * 75)
-    print("COMBINED PORTFOLIO RESULTS")
+    print("COMBINED PORTFOLIO RESULTS (ALL 3 PAIRS SIMULTANEOUS)")
     print("=" * 75)
 
     if not all_trades:
@@ -217,13 +255,14 @@ def main():
           f"{'*** SIGNIFICANT' if p_portfolio < 0.05 else '(not significant)'}")
 
     # Per-pair breakdown
-    print(f"\n--- Per-Pair Contribution ---")
-    for pair, trades in per_pair.items():
-        if not trades:
+    print(f"\n--- Per-Pair Contribution (Post-Cap) ---")
+    for pair in pairs:
+        pair_trades = [t for t in all_trades if t['ticker'] == pair]
+        if not pair_trades:
             continue
-        pnl = sum(t['pips'] for t in trades)
-        n_p = len(trades)
-        wr_p = sum(t['win'] for t in trades) / n_p * 100
+        pnl = sum(t['pips'] for t in pair_trades)
+        n_p = len(pair_trades)
+        wr_p = sum(t['win'] for t in pair_trades) / n_p * 100
         print(f"  {pair:8s}: Trades={n_p:3d}, WR={wr_p:.1f}%, PnL={pnl:8.1f} pips")
 
     # Monthly equity curve

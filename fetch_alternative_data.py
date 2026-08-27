@@ -20,7 +20,8 @@ def fetch_cot_data():
     print("  Downloading COT data from CFTC...")
     all_dfs = []
     
-    for year in [2023, 2024, 2025, 2026]:
+    current_year = datetime.now().year
+    for year in range(2023, current_year + 1):
         url = f"https://www.cftc.gov/files/dea/history/fut_fin_txt_{year}.zip"
         print(f"    Fetching {year}...", end=" ")
         try:
