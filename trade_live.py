@@ -393,8 +393,11 @@ class LiveV7Trader:
         mt5 = self.mt5
         positions = mt5.positions_get(ticket=trade['ticket'])
         if not positions:
+            acc = mt5.account_info()
+            if acc:
+                self.account_balance = acc.balance
             log.info(f"Trade {trade['ticket']} closed by SL/TP after "
-                     f"{trade['candles_held']} bars")
+                     f"{trade['candles_held']} bars. Updated Balance: ${self.account_balance:.2f}")
             self.active_trade = None
             return
 
@@ -413,6 +416,10 @@ class LiveV7Trader:
             log.info(f"Trade {trade['ticket']} reached horizon "
                      f"({self.horizon} bars). Closing...")
             self.close_position(trade['ticket'], 'horizon_exit')
+            acc = mt5.account_info()
+            if acc:
+                self.account_balance = acc.balance
+            log.info(f"Position closed. Updated Balance: ${self.account_balance:.2f}")
             self.active_trade = None
         else:
             log.info(f"Trade {trade['ticket']} holding "
@@ -511,6 +518,12 @@ class LiveV7Trader:
                 # Portfolio-level risk check: ensure we do not over-expose in the same USD direction
                 if not self.check_portfolio_usd_exposure(direction):
                     continue
+
+                # Refresh real-time live account balance from MT5
+                if self.mt5:
+                    acc = self.mt5.account_info()
+                    if acc:
+                        self.account_balance = acc.balance
 
                 # Query real-time pip value & broker constraints
                 pip_val = self.get_pip_value()
