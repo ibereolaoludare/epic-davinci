@@ -216,6 +216,10 @@ def run_walk_forward_backtest(ticker='USDJPY', meta_threshold=0.5,
             if regime_filter is not None and reg not in regime_filter:
                 continue
 
+            # Macro VIX Circuit Breaker: lockout during extreme volatility spikes
+            if 'Macro_VIX_Lockout' in df_te.columns and df_te['Macro_VIX_Lockout'].iloc[j] == 1:
+                continue
+
             entry_price = prices[j]
             entry_time = times[j]
 

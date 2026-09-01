@@ -510,6 +510,12 @@ class LiveV7Trader:
                              f"{self.regime_filter}, skipping")
                     continue
 
+                # Macro VIX Circuit Breaker: lockout during global volatility spikes
+                if 'Macro_VIX_Lockout' in feat_df.columns and float(latest['Macro_VIX_Lockout']) == 1:
+                    log.warning("Macro VIX Circuit Breaker ACTIVE (VIX Spike / Global Shock detected). "
+                                "Halting new trade entries for capital preservation.")
+                    continue
+
                 # Portfolio-level risk check: ensure we do not over-expose in the same USD direction
                 if not self.check_portfolio_usd_exposure(direction):
                     continue

@@ -27,7 +27,7 @@ EXCLUDE_COLS = ['Target', 'Meta_Label', 'Primary_Pred',
                 'Session_Complete_Time', 'date', 'date_x', 'date_y', 
                 'fed_rate', 'boj_rate', 'ecb_rate', 'boe_rate', 'rba_rate',
                 'COT_AUD_Net', 'COT_AUD_OI', 'COT_AUD_Long', 'COT_AUD_Short',
-                'COT_Long', 'COT_Short']
+                'COT_Long', 'COT_Short', 'Macro_VIX_Lockout']
 
 
 def _session_utc(hour):
@@ -299,8 +299,10 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
             df['VIX_Regime'] = (df['VIX'] > 20).astype(int)
             df['VIX_Spike'] = (df['VIX'] > 25).astype(int)
             df['VIX_Calm'] = (df['VIX'] < 15).astype(int)
+            # Macro VIX Circuit Breaker: lockout new entries when VIX surges >30% in 5d or VIX >= 28
+            df['Macro_VIX_Lockout'] = ((df['VIX'] >= 28) | (df['VIX_Change_5d'] > 30)).astype(int)
         else:
-            for c in ['VIX', 'VIX_Change_5d', 'VIX_Regime', 'VIX_Spike', 'VIX_Calm']:
+            for c in ['VIX', 'VIX_Change_5d', 'VIX_Regime', 'VIX_Spike', 'VIX_Calm', 'Macro_VIX_Lockout']:
                 df[c] = 0 if c not in ['VIX'] else 15
 
         # --- DXY Features ---

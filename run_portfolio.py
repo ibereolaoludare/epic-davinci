@@ -120,6 +120,9 @@ def run_pair_walk_forward(ticker, cfg):
                 continue
             if regimes[j] not in rf:
                 continue
+            # Macro VIX Circuit Breaker: skip new entries during extreme volatility spikes
+            if 'Macro_VIX_Lockout' in df_te.columns and df_te['Macro_VIX_Lockout'].iloc[j] == 1:
+                continue
 
             profit, exit_idx, bars = simulate_trade(
                 prices[j], j, int(d), prices, highs, lows, atrs, tp, sl, h)
