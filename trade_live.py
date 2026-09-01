@@ -574,23 +574,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python trade_live.py USDJPY
-  python trade_live.py EURUSD --risk 0.02
-  python trade_live.py GBPUSD --risk 0.01
-
-Prerequisites:
-  1. MetaTrader5 terminal running and logged in
-  2. Production models trained:
-       python train_v7_prod.py USDJPY
-       python train_v7_prod.py EURUSD
-       python train_v7_prod.py GBPUSD
-  3. Alternative data fetched:
-       python fetch_alternative_data.py
-  4. Central bank rates saved:
-       python download_data.py
+  python trade_live.py USDJPY --risk 0.02
+  python trade_live.py GBPJPY --risk 0.02
+  python trade_live.py AUDUSD --risk 0.02
         """)
     parser.add_argument('ticker', type=str,
-                        choices=['USDJPY', 'EURUSD', 'GBPUSD'],
+                        choices=['USDJPY', 'GBPJPY', 'AUDUSD', 'EURUSD', 'GBPUSD'],
                         help='Trading symbol')
     parser.add_argument('--risk', type=float, default=0.02,
                         help='Risk per trade as fraction (0.02 = 2%%)')
