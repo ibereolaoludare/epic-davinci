@@ -25,7 +25,9 @@ EXCLUDE_COLS = ['Target', 'Meta_Label', 'Primary_Pred',
                 'EMA_50', 'EMA_200', 'Hour', 'DayOfWeek',
                 'MACD_Signal', 'Returns', 'Session_High', 'Session_Low',
                 'Session_Complete_Time', 'date', 'date_x', 'date_y', 
-                'fed_rate', 'boj_rate', 'ecb_rate', 'boe_rate']
+                'fed_rate', 'boj_rate', 'ecb_rate', 'boe_rate', 'rba_rate',
+                'COT_AUD_Net', 'COT_AUD_OI', 'COT_AUD_Long', 'COT_AUD_Short',
+                'COT_Long', 'COT_Short']
 
 
 def _session_utc(hour):
@@ -60,6 +62,7 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     df['Is_London_Open'] = (df['Hour'] == 7).astype(int)
     df['Is_NY_Open'] = (df['Hour'] == 12).astype(int)
     df['Is_Tokyo_Open'] = (df['Hour'] == 0).astype(int)
+    df['Is_Sydney_Open'] = (df['Hour'] == 20).astype(int)
 
     # ========================
     # 2. TECHNICAL INDICATORS (backward-looking)
@@ -117,12 +120,12 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     # ========================
     # 3. SESSION RANGE BREAKOUT (PAIR-AWARE)
     # ========================
-    if ticker == 'USDJPY':
-        # On H4, Tokyo session = 00:00 and 04:00 UTC candles. Complete at 08:00.
+    if ticker in ['USDJPY', 'AUDUSD']:
+        # Tokyo / Sydney session = 00:00 and 04:00 UTC candles. Complete at 08:00.
         target_hours = [0, 4]
         complete_hour = 8
     else:
-        # On H4, London/NY overlap = 08:00 and 12:00 UTC candles. Complete at 16:00.
+        # On H4, London session = 08:00 and 12:00 UTC candles. Complete at 16:00.
         target_hours = [8, 12]
         complete_hour = 16
 
@@ -167,21 +170,27 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     if rates_df is None:
         try:
             rates_df = pd.read_csv("central_bank_rates.csv")
-            rates_df['date'] = pd.to_datetime(rates_df['date'], utc=True).astype('datetime64[ns, UTC]')
         except FileNotFoundError:
             rates_df = pd.DataFrame()
 
-    if not rates_df.empty:
+    if rates_df is not None and not rates_df.empty:
+        rates_df = rates_df.copy()
+        rates_df['date'] = pd.to_datetime(rates_df['date'], utc=True).astype('datetime64[ns, UTC]')
         rates_df = rates_df.sort_values('date')
         cols_to_merge = ['date', 'fed_rate', 'boj_rate']
-        if 'ecb_rate' in rates_df.columns:
-            cols_to_merge.extend(['ecb_rate', 'boe_rate'])
+        for opt_col in ['ecb_rate', 'boe_rate', 'rba_rate']:
+            if opt_col in rates_df.columns:
+                cols_to_merge.append(opt_col)
         
         df = pd.merge_asof(df.sort_values('Time'), rates_df[cols_to_merge],
                            left_on='Time', right_on='date', direction='backward')
                            
         if ticker == 'USDJPY':
             df['Rate_Diff'] = df['fed_rate'] - df['boj_rate']
+        elif ticker == 'GBPJPY':
+            df['Rate_Diff'] = df.get('boe_rate', 0) - df['boj_rate']
+        elif ticker == 'AUDUSD':
+            df['Rate_Diff'] = df.get('rba_rate', 0) - df['fed_rate']
         elif ticker == 'EURUSD':
             df['Rate_Diff'] = df.get('ecb_rate', 0) - df['fed_rate']
         elif ticker == 'GBPUSD':
@@ -194,13 +203,25 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
         df['Rate_Diff'], df['Rate_Diff_Mom'] = 0.0, 0.0
 
     # ========================
-    # 5. INTERVENTION ZONE FEATURES
+    # 5. MACRO BOUNDARY & INTERVENTION FEATURES
     # ========================
+    rolling_high_52w = df['High'].rolling(window=1560, min_periods=60).max()
+    rolling_low_52w = df['Low'].rolling(window=1560, min_periods=60).min()
+    df['Dist_From_52W_High'] = (df['Close'] - rolling_high_52w) / df['ATR'].replace(0, np.nan)
+    df['Dist_From_52W_Low'] = (df['Close'] - rolling_low_52w) / df['ATR'].replace(0, np.nan)
+    df['Dist_From_52W_High'] = df['Dist_From_52W_High'].fillna(0)
+    df['Dist_From_52W_Low'] = df['Dist_From_52W_Low'].fillna(0)
+
     if ticker == 'USDJPY':
         # BOJ historically intervenes near 160.000
         df['Dist_From_160'] = (df['Close'] - 160.0) / df['ATR']
         df['In_Intervention_Zone'] = (df['Close'] > 159.0).astype(int)
         df['Past_Intervention_Level'] = (df['Close'] > 157.0).astype(int)
+    elif ticker == 'GBPJPY':
+        # GBPJPY key psychological round number / intervention threshold near 200.00
+        df['Dist_From_160'] = (df['Close'] - 200.0) / df['ATR']
+        df['In_Intervention_Zone'] = (df['Close'] > 199.0).astype(int)
+        df['Past_Intervention_Level'] = (df['Close'] > 196.0).astype(int)
     else:
         df['Dist_From_160'] = 0.0
         df['In_Intervention_Zone'] = 0
@@ -212,26 +233,30 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     if alt_df is None:
         try:
             alt_df = pd.read_csv("alternative_data.csv")
-            alt_df['date'] = pd.to_datetime(alt_df['date'], utc=True).astype('datetime64[ns, UTC]')
-            alt_df = alt_df.sort_values('date')
         except FileNotFoundError:
             alt_df = pd.DataFrame()
 
-    if not alt_df.empty:
+    if alt_df is not None and not alt_df.empty:
+        alt_df = alt_df.copy()
+        alt_df['date'] = pd.to_datetime(alt_df['date'], utc=True).astype('datetime64[ns, UTC]')
+        alt_df = alt_df.sort_values('date')
         df = pd.merge_asof(df.sort_values('Time'), alt_df,
                            left_on='Time', right_on='date', direction='backward')
         df = df.drop(columns=['date'], errors='ignore')
 
-        # --- COT Features ---
-        if 'COT_Net' in df.columns and ticker == 'USDJPY':
-            df['COT_Net_Z'] = (df['COT_Net'] - df['COT_Net'].rolling(window=260, min_periods=30).mean()) / \
-                               df['COT_Net'].rolling(window=260, min_periods=30).std()
+        # --- COT Features (Pair-specific) ---
+        cot_target_col = 'COT_Net' if ticker in ['USDJPY', 'GBPJPY'] else ('COT_AUD_Net' if ticker == 'AUDUSD' else None)
+        
+        if cot_target_col and cot_target_col in df.columns:
+            df['COT_Net_Z'] = (df[cot_target_col] - df[cot_target_col].rolling(window=260, min_periods=30).mean()) / \
+                               df[cot_target_col].rolling(window=260, min_periods=30).std()
             df['COT_Net_Z'] = df['COT_Net_Z'].fillna(0)
-            df['COT_Change'] = df['COT_Net'] - df['COT_Net'].shift(42)
+            df['COT_Change'] = df[cot_target_col] - df[cot_target_col].shift(42)
             df['COT_Change'] = df['COT_Change'].fillna(0)
             # COT extreme = speculators too long/short (contrarian)
             df['COT_Extreme_Long'] = (df['COT_Net_Z'] > 1.5).astype(int)
             df['COT_Extreme_Short'] = (df['COT_Net_Z'] < -1.5).astype(int)
+            df['COT_OI'] = df['COT_OI'] if ticker in ['USDJPY', 'GBPJPY'] else (df.get('COT_AUD_OI', 0))
         else:
             for c in ['COT_Net', 'COT_OI', 'COT_Net_Z', 'COT_Change',
                        'COT_Extreme_Long', 'COT_Extreme_Short']:
@@ -251,6 +276,20 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
         else:
             for c in ['US10Y', 'US10Y_Mom_20', 'US10Y_Z_60', 'US10Y_Accel']:
                 df[c] = 0
+
+        # --- Copper Commodity Proxy Features ---
+        if 'Copper' in df.columns:
+            df['Copper'] = df['Copper'].ffill().fillna(3.8)
+            df['Copper_Mom_20'] = (df['Copper'] / df['Copper'].shift(120).replace(0, np.nan) - 1) * 100
+            df['Copper_Mom_20'] = df['Copper_Mom_20'].fillna(0)
+            df['Copper_Z_20d'] = (df['Copper'] - df['Copper'].rolling(window=120, min_periods=30).mean()) / \
+                                  df['Copper'].rolling(window=120, min_periods=30).std()
+            df['Copper_Z_20d'] = df['Copper_Z_20d'].fillna(0)
+            df['Copper_Accel'] = df['Copper_Mom_20'] - df['Copper_Mom_20'].shift(60)
+            df['Copper_Accel'] = df['Copper_Accel'].fillna(0)
+            df = df.drop(columns=['Copper'], errors='ignore')
+        else:
+            df['Copper_Mom_20'], df['Copper_Z_20d'], df['Copper_Accel'] = 0.0, 0.0, 0.0
 
         # --- VIX Features ---
         if 'VIX' in df.columns:
@@ -279,6 +318,7 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
         for c in ['COT_Net', 'COT_OI', 'COT_Net_Z', 'COT_Change',
                    'COT_Extreme_Long', 'COT_Extreme_Short',
                    'US10Y', 'US10Y_Mom_20', 'US10Y_Z_60', 'US10Y_Accel',
+                   'Copper_Mom_20', 'Copper_Z_20d', 'Copper_Accel',
                    'VIX_Change_5d', 'VIX_Regime', 'VIX_Spike', 'VIX_Calm',
                    'DXY_Mom_10d', 'DXY_Z_20d']:
             df[c] = 0

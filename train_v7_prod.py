@@ -26,19 +26,34 @@ from feature_engineering_v7 import get_feature_cols
 # Per-pair production configs (execution params, not training-label params)
 PAIR_CONFIGS = {
     'USDJPY': {
-        'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.40,
+        'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 6,
+        'meta_threshold': 0.50,
         'regime_filter': ['risk_on', 'intervention', 'range', 'trend'],
+        'depth': 5, 'lr': 0.05
+    },
+    'GBPJPY': {
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
+        'meta_threshold': 0.50,
+        'regime_filter': ['risk_on', 'risk_off', 'trend', 'mixed'],
+        'depth': 6, 'lr': 0.03
+    },
+    'AUDUSD': {
+        'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 6,
+        'meta_threshold': 0.45,
+        'regime_filter': ['risk_on', 'risk_off', 'trend', 'mixed'],
+        'depth': 6, 'lr': 0.03
     },
     'EURUSD': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.51,
         'regime_filter': ['mixed', 'trend'],
+        'depth': 5, 'lr': 0.05
     },
     'GBPUSD': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.40,
         'regime_filter': ['mixed', 'risk_off', 'trend'],
+        'depth': 5, 'lr': 0.05
     },
 }
 
@@ -83,9 +98,11 @@ def main():
     y_val = df_val['Target']
 
     # --- Primary Model ---
-    print("\nTraining Primary Model...")
+    depth = cfg.get('depth', 5)
+    lr = cfg.get('lr', 0.05)
+    print(f"\nTraining Primary Model (depth={depth}, lr={lr})...")
     primary = CatBoostClassifier(
-        iterations=500, learning_rate=0.05, depth=5, l2_leaf_reg=3,
+        iterations=600, learning_rate=lr, depth=depth, l2_leaf_reg=4,
         loss_function='MultiClass', eval_metric='MultiClass',
         auto_class_weights='Balanced', random_seed=42, verbose=100,
     )
@@ -107,13 +124,13 @@ def main():
     mask_val = pri_val != 0
 
     meta = CatBoostClassifier(
-        iterations=300, learning_rate=0.05, depth=4, l2_leaf_reg=5,
+        iterations=400, learning_rate=lr, depth=depth, l2_leaf_reg=4,
         loss_function='Logloss', eval_metric='Logloss',
         auto_class_weights='Balanced', random_seed=42, verbose=100,
     )
     meta.fit(X_tr_m[mask_tr], meta_y_tr[mask_tr],
              eval_set=(X_val_m[mask_val], meta_y_val[mask_val]),
-             early_stopping_rounds=30, use_best_model=True)
+             early_stopping_rounds=40, use_best_model=True)
 
     # --- Holdout Validation ---
     print(f"\n=== HOLDOUT VALIDATION ({holdout_start.strftime('%Y-%m-%d')} onwards) ===")

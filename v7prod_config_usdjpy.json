@@ -1,9 +1,9 @@
 {
   "ticker": "USDJPY",
-  "tp_mult": 1.2,
+  "tp_mult": 1.5,
   "sl_mult": 1.0,
   "horizon": 6,
-  "meta_threshold": 0.4,
+  "meta_threshold": 0.5,
   "regime_filter": [
     "risk_on",
     "intervention",
@@ -18,6 +18,7 @@
     "Is_London_Open",
     "Is_NY_Open",
     "Is_Tokyo_Open",
+    "Is_Sydney_Open",
     "RSI_14",
     "RSI_Extreme_Long",
     "RSI_Extreme_Short",
@@ -42,6 +43,8 @@
     "Session_Dist_Mid",
     "Rate_Diff",
     "Rate_Diff_Mom",
+    "Dist_From_52W_High",
+    "Dist_From_52W_Low",
     "Dist_From_160",
     "In_Intervention_Zone",
     "Past_Intervention_Level",
@@ -56,6 +59,9 @@
     "US10Y_Mom_20",
     "US10Y_Z_60",
     "US10Y_Accel",
+    "Copper_Mom_20",
+    "Copper_Z_20d",
+    "Copper_Accel",
     "VIX_Change_5d",
     "VIX_Regime",
     "VIX_Spike",
@@ -65,6 +71,6 @@
     "Carry_Score",
     "VIX_USDJPY_Divergence"
   ],
-  "train_end": "2026-05-12 04:00:00+00:00",
-  "holdout_start": "2026-05-14 08:00:00+00:00"
+  "train_end": "2026-06-29 16:00:00+00:00",
+  "holdout_start": "2026-07-01 20:00:00+00:00"
 }

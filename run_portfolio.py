@@ -22,20 +22,23 @@ warnings.filterwarnings('ignore')
 
 PORTFOLIO_CONFIGS = {
     'USDJPY': {
-        'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.40,
+        'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 6,
+        'meta_threshold': 0.50,
         'regime_filter': ['risk_on', 'intervention', 'range', 'trend'],
+        'depth': 5, 'lr': 0.05
     },
-    'EURUSD': {
+    'GBPJPY': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.51,
-        'regime_filter': ['mixed', 'trend'],
+        'meta_threshold': 0.50,
+        'regime_filter': ['risk_on', 'risk_off', 'trend', 'mixed'],
+        'depth': 6, 'lr': 0.03
     },
-    'GBPUSD': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.40,
-        'regime_filter': ['mixed', 'risk_off', 'trend'],
-    },
+    'AUDUSD': {
+        'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 6,
+        'meta_threshold': 0.45,
+        'regime_filter': ['risk_on', 'risk_off', 'trend', 'mixed'],
+        'depth': 6, 'lr': 0.03
+    }
 }
 
 
@@ -58,6 +61,8 @@ def run_pair_walk_forward(ticker, cfg):
     tp, sl, h = cfg['tp_mult'], cfg['sl_mult'], cfg['horizon']
     mt = cfg['meta_threshold']
     rf = cfg['regime_filter']
+    depth = cfg.get('depth', 5)
+    lr = cfg.get('lr', 0.05)
     pip_size = 0.01 if ticker.endswith('JPY') else 0.0001
 
     all_trades = []
@@ -84,10 +89,10 @@ def run_pair_walk_forward(ticker, cfg):
         X_val = df_val_inner[feature_cols]
         y_val = df_val_inner['Target']
 
-        primary = train_primary(X_tr, y_tr, X_val, y_val)
+        primary = train_primary(X_tr, y_tr, X_val, y_val, depth=depth, lr=lr)
         pri_tr = primary.predict(X_tr).flatten().astype(float)
         pri_val = primary.predict(X_val).flatten().astype(float)
-        meta = train_meta(X_tr, pri_tr, y_tr.values, X_val, pri_val, y_val.values)
+        meta = train_meta(X_tr, pri_tr, y_tr.values, X_val, pri_val, y_val.values, depth=depth, lr=lr)
         if meta is None:
             continue
 
@@ -175,10 +180,10 @@ def apply_portfolio_usd_cap(trades, max_usd_exposure=2):
 
 
 def main():
-    pairs = sys.argv[1:] if len(sys.argv) > 1 else ['USDJPY', 'EURUSD', 'GBPUSD']
+    pairs = sys.argv[1:] if len(sys.argv) > 1 else ['USDJPY', 'GBPJPY', 'AUDUSD']
 
     print("=" * 75)
-    print("PORTFOLIO WALK-FORWARD BACKTEST (V7)")
+    print(f"PORTFOLIO WALK-FORWARD BACKTEST (V7) - BASKET: {pairs}")
     print("=" * 75)
 
     all_raw_trades = []
@@ -209,12 +214,12 @@ def main():
                   f"PnL={pnl:.1f} | PF={pf:.2f} | p={p_val:.4f} "
                   f"{'***' if p_val < 0.05 else ''}")
 
-    # By default, run uncapped (all 3 pairs allowed simultaneously)
+    # By default, run uncapped (all pairs allowed simultaneously)
     all_trades = all_raw_trades
 
     # --- Portfolio Aggregation ---
     print("\n" + "=" * 75)
-    print("COMBINED PORTFOLIO RESULTS (ALL 3 PAIRS SIMULTANEOUS)")
+    print(f"COMBINED PORTFOLIO RESULTS (ALL {len(pairs)} PAIRS SIMULTANEOUS)")
     print("=" * 75)
 
     if not all_trades:
@@ -255,7 +260,7 @@ def main():
           f"{'*** SIGNIFICANT' if p_portfolio < 0.05 else '(not significant)'}")
 
     # Per-pair breakdown
-    print(f"\n--- Per-Pair Contribution (Post-Cap) ---")
+    print(f"\n--- Per-Pair Contribution ---")
     for pair in pairs:
         pair_trades = [t for t in all_trades if t['ticker'] == pair]
         if not pair_trades:
@@ -276,33 +281,43 @@ def main():
         bar = '+' * int(abs(v) / 15) if v > 0 else '-' * int(abs(v) / 15)
         print(f"  {k}: {v:8.1f} pips  {bar}")
 
-    # --- Position Sizing for Real Accounts ---
-    # pip values per 1.00 standard lot (100K units):
-    #   USDJPY: ~$6.67/pip (100K * 0.01 / 150 rate)
-    #   EURUSD: $10/pip (100K * 0.0001)
-    #   GBPUSD: $10/pip
-    usd_per_pip_per_lot = {'USDJPY': 6.67, 'EURUSD': 10.0, 'GBPUSD': 10.0}
+    # --- Position Sizing & 2% Dynamic Compounding Simulation ---
+    usd_per_pip_per_lot = {'USDJPY': 6.67, 'GBPJPY': 6.67, 'AUDUSD': 10.0, 'EURUSD': 10.0, 'GBPUSD': 10.0}
 
-    # Average loss per trade in pips (for risk calculation)
+    # Simulation with $1,000 start
+    initial_balance = 1000.0
+    comp_balance = initial_balance
+    comp_equity_curve = [initial_balance]
+    fixed_balance = initial_balance
+    fixed_equity_curve = [initial_balance]
+
     avg_loss_pips = np.mean([abs(t['pips']) for t in all_trades if t['pips'] < 0])
     avg_win_pips = np.mean([t['pips'] for t in all_trades if t['pips'] > 0])
 
-    print(f"\n--- Position Sizing Guide (risk-based, NOT fixed lots) ---")
-    print(f"Avg win:  {avg_win_pips:.1f} pips | Avg loss: {avg_loss_pips:.1f} pips")
-    print()
-    print(f"  {'Account':>10s} | {'Risk/Trade':>10s} | {'Lot Size':>10s} | {'Max DD $':>10s} | {'Est. Total PnL':>15s}")
-    print(f"  {'-'*10}-+-{'-'*10}-+-{'-'*10}-+-{'-'*10}-+-{'-'*15}")
+    for t in all_trades:
+        pip_val = usd_per_pip_per_lot.get(t['ticker'], 10.0)
+        # Fixed 2% risk based on initial balance
+        fixed_lot = max(0.01, (initial_balance * 0.02) / (avg_loss_pips * pip_val))
+        fixed_pnl = t['pips'] * pip_val * fixed_lot
+        fixed_balance += fixed_pnl
+        fixed_equity_curve.append(fixed_balance)
 
-    for account_size in [1000, 2500, 5000, 8000]:
-        risk_pct = 0.02  # 2% risk per trade
-        risk_per_trade = account_size * risk_pct
-        # Use the worst-case (highest) pip value among traded pairs for safety
-        max_pip_val = max(usd_per_pip_per_lot.values())
-        # Lot size = risk / (avg_loss_pips * pip_value_per_lot)
-        lot_size = risk_per_trade / (avg_loss_pips * max_pip_val)
-        max_dd_usd = mdd * max_pip_val * lot_size
-        total_usd = total_pnl * np.mean([usd_per_pip_per_lot[t['ticker']] for t in all_trades]) * lot_size
-        print(f"  ${account_size:>8,d} | ${risk_per_trade:>8.2f} | {lot_size:>10.4f} | ${max_dd_usd:>8.2f} | ${total_usd:>13.2f}")
+        # Dynamic 2% compounding risk
+        comp_lot = max(0.01, (comp_balance * 0.02) / (avg_loss_pips * pip_val))
+        comp_pnl = t['pips'] * pip_val * comp_lot
+        comp_balance += comp_pnl
+        comp_equity_curve.append(comp_balance)
+
+    # Compounding Max DD %
+    comp_peak = np.maximum.accumulate(comp_equity_curve)
+    comp_dds = (comp_peak - np.array(comp_equity_curve)) / comp_peak * 100
+    max_comp_dd_pct = np.max(comp_dds)
+
+    print(f"\n--- 2% Dynamic Compounding Performance ($1,000 Start) ---")
+    print(f"  Fixed Lot Final Balance:       ${fixed_balance:,.2f} ({((fixed_balance/initial_balance)-1)*100:+.1f}%)")
+    print(f"  Dynamic Compounding Balance:   ${comp_balance:,.2f} ({((comp_balance/initial_balance)-1)*100:+.1f}%)")
+    print(f"  Max Compounding Drawdown:      {max_comp_dd_pct:.2f}%")
+    print(f"  Avg Win: {avg_win_pips:.1f} pips | Avg Loss: {avg_loss_pips:.1f} pips")
 
     print()
     print(f"  Risk rule: 2% of account per trade, lot size = risk / (avg_loss_pips * pip_value)")

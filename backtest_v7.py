@@ -44,9 +44,9 @@ def build_walk_forward_splits(df, train_months=6, test_months=2):
     return splits
 
 
-def train_primary(X_train, y_train, X_val, y_val):
+def train_primary(X_train, y_train, X_val, y_val, depth=5, lr=0.05):
     model = CatBoostClassifier(
-        iterations=500, learning_rate=0.05, depth=5, l2_leaf_reg=3,
+        iterations=600, learning_rate=lr, depth=depth, l2_leaf_reg=4,
         loss_function='MultiClass', eval_metric='MultiClass',
         auto_class_weights='Balanced', random_seed=42, verbose=0,
     )
@@ -55,7 +55,7 @@ def train_primary(X_train, y_train, X_val, y_val):
     return model
 
 
-def train_meta(X_train, primary_preds, y_train, X_val, primary_val, y_val):
+def train_meta(X_train, primary_preds, y_train, X_val, primary_val, y_val, depth=5, lr=0.05):
     meta_y_tr = (primary_preds == y_train).astype(int)
     meta_y_val = (primary_val == y_val).astype(int)
     X_tr_meta = X_train.copy()
@@ -67,13 +67,13 @@ def train_meta(X_train, primary_preds, y_train, X_val, primary_val, y_val):
     if mask_tr.sum() < 50 or mask_val.sum() < 10:
         return None
     model = CatBoostClassifier(
-        iterations=300, learning_rate=0.05, depth=4, l2_leaf_reg=5,
+        iterations=400, learning_rate=lr, depth=depth, l2_leaf_reg=4,
         loss_function='Logloss', eval_metric='Logloss',
         auto_class_weights='Balanced', random_seed=42, verbose=0,
     )
     model.fit(X_tr_meta[mask_tr], meta_y_tr[mask_tr],
               eval_set=(X_val_meta[mask_val], meta_y_val[mask_val]),
-              early_stopping_rounds=30, use_best_model=True)
+              early_stopping_rounds=40, use_best_model=True)
     return model
 
 

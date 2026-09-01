@@ -309,6 +309,7 @@ class LiveV7Trader:
 
         digits = mt5.symbol_info(self.ticker).digits
         filling = self._get_filling_mode()
+        dev_pts = 20 if self.ticker == 'AUDUSD' else 50
         request = {
             'action': mt5.TRADE_ACTION_DEAL,
             'symbol': self.ticker,
@@ -317,7 +318,7 @@ class LiveV7Trader:
             'price': price,
             'sl': round(sl_price, digits),
             'tp': round(tp_price, digits),
-            'deviation': 50,
+            'deviation': dev_pts,
             'magic': 234000,
             'comment': f'V7 {int(self.tp_mult*10)}x{int(self.sl_mult*10)}',
             'type_time': mt5.ORDER_TIME_GTC,
@@ -403,10 +404,11 @@ class LiveV7Trader:
             tick = mt5.symbol_info_tick(self.ticker)
             current_spread = (tick.ask - tick.bid) / self.pip_size if tick else 1.0
             now_hour = datetime.now(timezone.utc).hour
+            max_spread = 2.0 if self.ticker == 'AUDUSD' else 3.5
             
             # If during daily rollover (21:00-22:00 UTC) with wide spread, defer market exit briefly
-            if (21 <= now_hour <= 22 or current_spread > 3.5) and trade['candles_held'] == self.horizon:
-                log.warning(f"Trade {trade['ticket']} reached horizon, but elevated spread ({current_spread:.1f} pips) "
+            if (21 <= now_hour <= 22 or current_spread > max_spread) and trade['candles_held'] == self.horizon:
+                log.warning(f"Trade {trade['ticket']} reached horizon, but elevated spread ({current_spread:.1f} pips > max {max_spread:.1f}) "
                             f"or rollover hour detected. Deferring market close until spread normalizes.")
                 return
 
