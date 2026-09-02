@@ -14,6 +14,7 @@ New features:
 
 All joins use merge_asof(direction='backward'). No look-ahead.
 """
+import os
 import pandas as pd
 import numpy as np
 import warnings
@@ -43,7 +44,7 @@ def _session_utc(hour):
         return 'Offhours'
 
 
-def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
+def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_training=True):
     df = df_raw.copy()
     df['Time'] = pd.to_datetime(df['Time'], utc=True).astype('datetime64[ns, UTC]')
     df = df.sort_values('Time').reset_index(drop=True)
@@ -120,6 +121,9 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     # ========================
     # 3. SESSION RANGE BREAKOUT (PAIR-AWARE)
     # ========================
+    roll_high_24h = df['High'].rolling(6, min_periods=1).max()
+    roll_low_24h = df['Low'].rolling(6, min_periods=1).min()
+
     if ticker in ['USDJPY', 'AUDUSD']:
         # Tokyo / Sydney session = 00:00 and 04:00 UTC candles. Complete at 08:00.
         target_hours = [0, 4]
@@ -136,25 +140,23 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
         Session_High=('High', 'max'),
         Session_Low=('Low', 'min')
     ).reset_index()
-    session_df['Date'] = pd.to_datetime(session_df['Date'])
 
-    # Assign session range to the completion candle of the SAME day
-    df['Session_Complete_Time'] = df.apply(
-        lambda r: pd.Timestamp(r['Date']) + pd.Timedelta(hours=complete_hour)
-        if r['Hour'] == complete_hour else pd.NaT, axis=1
-    )
-    session_df['Session_Complete_Time'] = session_df['Date'] + pd.Timedelta(hours=complete_hour)
+    if not session_df.empty:
+        session_df['Date_Str'] = session_df['Date'].astype(str)
+        df['Date_Str'] = df['Date'].astype(str)
+        df = df.merge(session_df[['Date_Str', 'Session_High', 'Session_Low']],
+                      on='Date_Str', how='left')
+        df['Session_High'] = df['Session_High'].ffill().bfill().fillna(roll_high_24h)
+        df['Session_Low'] = df['Session_Low'].ffill().bfill().fillna(roll_low_24h)
+        df = df.drop(columns=['Date_Str'], errors='ignore')
+    else:
+        df['Session_High'] = roll_high_24h
+        df['Session_Low'] = roll_low_24h
 
-    df = df.merge(session_df[['Session_Complete_Time', 'Session_High', 'Session_Low']],
-                  on='Session_Complete_Time', how='left', suffixes=('', '_new'))
-
-    # Forward-fill: candles before complete get previous day's range
-    df['Session_High'] = df['Session_High'].ffill()
-    df['Session_Low'] = df['Session_Low'].ffill()
     df['Session_Range'] = (df['Session_High'] - df['Session_Low']) / df['ATR'].replace(0, np.nan)
     df['Session_Range'] = df['Session_Range'].fillna(0)
 
-    # Breakout direction: where is current close relative to PREVIOUS completed range?
+    # Breakout direction: where is current close relative to session range?
     df['Session_Breakout_Up'] = (df['Close'] > df['Session_High']).astype(int)
     df['Session_Breakout_Down'] = (df['Close'] < df['Session_Low']).astype(int)
 
@@ -162,16 +164,21 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     df['Session_Dist_Mid'] = (df['Close'] - session_mid) / df['ATR'].replace(0, np.nan)
     df['Session_Dist_Mid'] = df['Session_Dist_Mid'].fillna(0)
 
-    df = df.drop(columns=['Date', 'Is_Target_Session', 'Session_Complete_Time'])
+    df = df.drop(columns=['Date', 'Is_Target_Session', 'Session_Complete_Time'], errors='ignore')
 
     # ========================
     # 4. CENTRAL BANK RATES (backward merge)
     # ========================
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     if rates_df is None:
+        rates_path = os.path.join(BASE_DIR, "central_bank_rates.csv")
         try:
-            rates_df = pd.read_csv("central_bank_rates.csv")
-        except FileNotFoundError:
-            rates_df = pd.DataFrame()
+            rates_df = pd.read_csv(rates_path)
+        except Exception:
+            try:
+                rates_df = pd.read_csv("central_bank_rates.csv")
+            except Exception:
+                rates_df = pd.DataFrame()
 
     if rates_df is not None and not rates_df.empty:
         rates_df = rates_df.copy()
@@ -231,10 +238,14 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     # 6. ALTERNATIVE DATA (backward merge)
     # ========================
     if alt_df is None:
+        alt_path = os.path.join(BASE_DIR, "alternative_data.csv")
         try:
-            alt_df = pd.read_csv("alternative_data.csv")
-        except FileNotFoundError:
-            alt_df = pd.DataFrame()
+            alt_df = pd.read_csv(alt_path)
+        except Exception:
+            try:
+                alt_df = pd.read_csv("alternative_data.csv")
+            except Exception:
+                alt_df = pd.DataFrame()
 
     if alt_df is not None and not alt_df.empty:
         alt_df = alt_df.copy()
@@ -441,7 +452,11 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY'):
     # ========================
     # 10. CLEANUP
     # ========================
-    df = df.dropna().reset_index(drop=True)
+    if is_training:
+        df = df.dropna().reset_index(drop=True)
+    else:
+        # Live inference mode: fill missing values to guarantee live candles are retained
+        df = df.bfill().ffill().fillna(0).reset_index(drop=True)
 
     return df
 

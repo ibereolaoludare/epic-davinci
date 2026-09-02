@@ -249,10 +249,14 @@ class LiveV7Trader:
         return df[['Time', 'Open', 'High', 'Low', 'Close', 'Volume']]
 
     def compute_features(self, df):
-        feat_df = process_features_v7(df, ticker=self.ticker)
-        if feat_df.empty:
+        try:
+            feat_df = process_features_v7(df, ticker=self.ticker, is_training=False)
+            if feat_df.empty:
+                return None
+            return feat_df
+        except Exception as e:
+            log.error(f"Error computing features: {e}", exc_info=True)
             return None
-        return feat_df
 
     def get_signal(self, feat_row):
         X = feat_row[self.feature_cols].values.reshape(1, -1)
