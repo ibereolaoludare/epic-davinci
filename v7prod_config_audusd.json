@@ -1,14 +1,12 @@
 {
   "ticker": "AUDUSD",
-  "tp_mult": 1.2,
+  "tp_mult": 1.5,
   "sl_mult": 1.0,
-  "horizon": 6,
-  "meta_threshold": 0.45,
+  "horizon": 4,
+  "meta_threshold": 0.5,
   "regime_filter": [
     "risk_on",
-    "risk_off",
-    "trend",
-    "mixed"
+    "trend"
   ],
   "feature_cols": [
     "Time_Of_Day_Sin",

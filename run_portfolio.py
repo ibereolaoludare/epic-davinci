@@ -34,9 +34,9 @@ PORTFOLIO_CONFIGS = {
         'depth': 6, 'lr': 0.03
     },
     'AUDUSD': {
-        'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.45,
-        'regime_filter': ['risk_on', 'risk_off', 'trend', 'mixed'],
+        'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 4,
+        'meta_threshold': 0.50,
+        'regime_filter': ['risk_on', 'trend'],
         'depth': 6, 'lr': 0.03
     }
 }
