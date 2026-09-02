@@ -108,6 +108,58 @@ class LiveV7Trader:
         self.mt5 = None
         self.active_trade = None
         self.broker_utc_offset = timedelta(hours=0)
+        
+        # Persistent state tracking across restarts
+        self.load_state()
+
+    def load_state(self):
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        self.state_file = os.path.join(BASE_DIR, f'live_state_{self.ticker.lower()}.json')
+        self.circuit_breaker_lockout_until = None
+        self.consecutive_losses = 0
+        self.cooldown_until = None
+        self.last_processed_candle_time = None
+
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, 'r') as f:
+                    st = json.load(f)
+                if st.get('circuit_breaker_lockout_until'):
+                    self.circuit_breaker_lockout_until = datetime.fromisoformat(st['circuit_breaker_lockout_until'])
+                if st.get('cooldown_until'):
+                    self.cooldown_until = datetime.fromisoformat(st['cooldown_until'])
+                self.consecutive_losses = st.get('consecutive_losses', 0)
+                if st.get('last_processed_candle_time'):
+                    self.last_processed_candle_time = st['last_processed_candle_time']
+                
+                # Check if circuit breaker is still active from prior run
+                now = datetime.now(timezone.utc)
+                if self.circuit_breaker_lockout_until and now < self.circuit_breaker_lockout_until:
+                    rem_sec = (self.circuit_breaker_lockout_until - now).total_seconds()
+                    log.warning(f"RESTORED STATE: Macro VIX Circuit Breaker lockout active for another "
+                                f"{int(rem_sec//3600)}h{int((rem_sec%3600)//60)}m (until {self.circuit_breaker_lockout_until.strftime('%Y-%m-%d %H:%M UTC')}).")
+                if self.cooldown_until and now < self.cooldown_until:
+                    rem_sec = (self.cooldown_until - now).total_seconds()
+                    log.warning(f"RESTORED STATE: Loss Cooldown active for another "
+                                f"{int(rem_sec//3600)}h{int((rem_sec%3600)//60)}m (until {self.cooldown_until.strftime('%Y-%m-%d %H:%M UTC')}).")
+            except Exception as e:
+                log.warning(f"Failed to load state file: {e}")
+
+    def save_state(self):
+        try:
+            st = {
+                'ticker': self.ticker,
+                'circuit_breaker_lockout_until': self.circuit_breaker_lockout_until.isoformat() if self.circuit_breaker_lockout_until else None,
+                'consecutive_losses': self.consecutive_losses,
+                'cooldown_until': self.cooldown_until.isoformat() if self.cooldown_until else None,
+                'last_processed_candle_time': str(self.last_processed_candle_time) if self.last_processed_candle_time else None,
+                'active_trade': self.active_trade,
+                'last_saved_utc': datetime.now(timezone.utc).isoformat()
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(st, f, indent=2)
+        except Exception as e:
+            log.warning(f"Failed to save state: {e}")
 
     def get_pip_value(self):
         """Calculate dynamic real-time pip value per standard lot from live market price / MT5."""
@@ -400,7 +452,28 @@ class LiveV7Trader:
         if not positions:
             log.info(f"Trade {trade['ticket']} closed by SL/TP after "
                      f"{trade['candles_held']} bars")
+            # Query deal history to check win/loss outcome and update cooldown
+            try:
+                from_time = datetime.now(timezone.utc) - timedelta(days=7)
+                deals = mt5.history_deals_get(from_time, datetime.now(timezone.utc), position=trade['ticket'])
+                if deals:
+                    total_profit = sum(d.profit + d.swap + d.fee for d in deals)
+                    if total_profit > 0:
+                        log.info(f"Trade {trade['ticket']} closed in PROFIT (+${total_profit:.2f}). Resetting loss streak.")
+                        self.consecutive_losses = 0
+                        self.cooldown_until = None
+                    else:
+                        self.consecutive_losses += 1
+                        log.warning(f"Trade {trade['ticket']} closed at a LOSS (-${abs(total_profit):.2f}). "
+                                    f"Consecutive losses: {self.consecutive_losses}")
+                        if self.consecutive_losses >= 2:
+                            self.cooldown_until = datetime.now(timezone.utc) + timedelta(hours=24)
+                            log.warning(f"2 consecutive losses reached. 24-hour pair cooldown ACTIVE until "
+                                        f"{self.cooldown_until.strftime('%Y-%m-%d %H:%M UTC')}.")
+            except Exception as e:
+                log.warning(f"Could not inspect deal history: {e}")
             self.active_trade = None
+            self.save_state()
             return
 
         if trade['candles_held'] >= self.horizon:
@@ -420,9 +493,11 @@ class LiveV7Trader:
                      f"({self.horizon} bars). Closing...")
             self.close_position(trade['ticket'], 'horizon_exit')
             self.active_trade = None
+            self.save_state()
         else:
             log.info(f"Trade {trade['ticket']} holding "
                      f"({trade['candles_held']}/{self.horizon} bars)")
+            self.save_state()
 
     def run(self):
         self.connect()
@@ -514,10 +589,26 @@ class LiveV7Trader:
                              f"{self.regime_filter}, skipping")
                     continue
 
+                # Persistent Circuit Breaker & Cooldown Lockout Check
+                now_utc = datetime.now(timezone.utc)
+                if self.circuit_breaker_lockout_until and now_utc < self.circuit_breaker_lockout_until:
+                    rem_sec = (self.circuit_breaker_lockout_until - now_utc).total_seconds()
+                    log.warning(f"Macro VIX Circuit Breaker ACTIVE ({int(rem_sec//3600)}h{int((rem_sec%3600)//60)}m remaining until {self.circuit_breaker_lockout_until.strftime('%Y-%m-%d %H:%M UTC')}). "
+                                f"Skipping new trade entries.")
+                    continue
+
+                if self.cooldown_until and now_utc < self.cooldown_until:
+                    rem_sec = (self.cooldown_until - now_utc).total_seconds()
+                    log.warning(f"Consecutive Loss Cooldown ACTIVE ({int(rem_sec//3600)}h{int((rem_sec%3600)//60)}m remaining until {self.cooldown_until.strftime('%Y-%m-%d %H:%M UTC')}). "
+                                f"Skipping new trade entries.")
+                    continue
+
                 # Macro VIX Circuit Breaker: lockout during global volatility spikes
                 if 'Macro_VIX_Lockout' in feat_df.columns and float(latest['Macro_VIX_Lockout']) == 1:
-                    log.warning("Macro VIX Circuit Breaker ACTIVE (VIX Spike / Global Shock detected). "
-                                "Halting new trade entries for capital preservation.")
+                    self.circuit_breaker_lockout_until = now_utc + timedelta(hours=24)
+                    self.save_state()
+                    log.warning(f"Macro VIX Circuit Breaker TRIPPED (VIX Spike / Global Shock detected). "
+                                f"Locking out new entries for 24h (until {self.circuit_breaker_lockout_until.strftime('%Y-%m-%d %H:%M UTC')}). State saved to disk.")
                     continue
 
                 # Portfolio-level risk check: ensure we do not over-expose in the same USD direction
@@ -559,6 +650,7 @@ class LiveV7Trader:
                         'tp_price': tp_price,
                         'lot': lot,
                     }
+                    self.save_state()
 
             except KeyboardInterrupt:
                 log.info("Shutting down by user request...")
