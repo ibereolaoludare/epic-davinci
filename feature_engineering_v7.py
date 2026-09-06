@@ -202,6 +202,8 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_
             df['Rate_Diff'] = df.get('ecb_rate', 0) - df['fed_rate']
         elif ticker == 'GBPUSD':
             df['Rate_Diff'] = df.get('boe_rate', 0) - df['fed_rate']
+        elif ticker in ['XAUUSD', 'GOLD']:
+            df['Rate_Diff'] = 0.0 - df['fed_rate']
         else:
             df['Rate_Diff'] = 0.0
             
@@ -353,10 +355,11 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_
     # ========================
     # 8. REGIME LABEL (for gating, not for model)
     # ========================
+    is_intervention = (df['Close'] > 159.0) if ticker == 'USDJPY' else ((df['Close'] > 199.0) if ticker == 'GBPJPY' else pd.Series(False, index=df.index))
     conditions = [
         (df['VIX'] >= 25) | (df['VIX_Change_5d'] > 30),  # Risk-off crash
         (df['VIX'] <= 15) & (df['Rate_Diff'] > 0),       # Risk-on carry
-        (df['Close'] > 159.0),                            # Intervention zone
+        is_intervention,                                  # Intervention zone (JPY only)
         (df['ATR_Percentile'] < 0.3),                     # Low vol range
         (df['ATR_Percentile'] > 0.7),                     # High vol trend
     ]

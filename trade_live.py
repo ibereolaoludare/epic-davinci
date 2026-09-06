@@ -89,7 +89,7 @@ class LiveV7Trader:
         self.ticker = ticker
         self.risk_pct = risk_pct
         self.account_balance = 0.0  # Will be populated by connect()
-        self.pip_size = 0.01 if ticker.endswith('JPY') else 0.0001
+        self.pip_size = 0.01 if ticker.endswith('JPY') else (0.10 if ticker in ['XAUUSD', 'GOLD'] else 0.0001)
         self.pip_value_per_lot = 6.67 if ticker.endswith('JPY') else 10.0
 
         log.info(f"Loading production models for {ticker}...")
@@ -192,7 +192,7 @@ class LiveV7Trader:
                 is_buy = (pos.type == self.mt5.ORDER_TYPE_BUY)
                 if sym.endswith('JPY'):
                     usd_exposure += 1 if is_buy else -1
-                else:  # EURUSD, GBPUSD (USD is quote currency)
+                else:  # AUDUSD, EURUSD, GBPUSD, XAUUSD (USD is quote currency)
                     usd_exposure += -1 if is_buy else 1
                     
         # Calculate proposed new exposure for this trade
@@ -202,7 +202,7 @@ class LiveV7Trader:
             new_exp = -1 if proposed_direction == 1 else 1
             
         total_exp = usd_exposure + new_exp
-        MAX_USD_EXPOSURE = 3  # Uncapped mode: Allows all 3 pairs to trade simultaneously
+        MAX_USD_EXPOSURE = 4  # Uncapped mode: Allows all 4 assets to trade simultaneously
         if abs(total_exp) > MAX_USD_EXPOSURE:
             log.warning(f"Portfolio USD Exposure Cap reached (Current={usd_exposure}, Proposed={new_exp}, Max={MAX_USD_EXPOSURE}). "
                         f"Skipping trade to prevent correlated USD drawdown.")
@@ -232,12 +232,17 @@ class LiveV7Trader:
 
         # Auto-detect broker server time offset relative to true UTC
         tick = mt5.symbol_info_tick(self.ticker)
-        if tick:
+        if tick and tick.time > 0:
             server_time = datetime.fromtimestamp(tick.time, tz=timezone.utc)
             now_utc = datetime.now(timezone.utc)
-            offset_hours = round((server_time - now_utc).total_seconds() / 3600)
-            self.broker_utc_offset = timedelta(hours=offset_hours)
-            log.info(f"Broker server time offset detected: {offset_hours:+d}h relative to UTC")
+            raw_diff = (server_time - now_utc).total_seconds() / 3600
+            if abs(raw_diff) <= 14:
+                offset_hours = round(raw_diff)
+                self.broker_utc_offset = timedelta(hours=offset_hours)
+                log.info(f"Broker server time offset detected: {offset_hours:+d}h relative to UTC")
+            else:
+                self.broker_utc_offset = timedelta(hours=0)
+                log.info("Weekend/inactive tick detected. Using default broker offset (+0h).")
 
         # Reconcile existing open positions
         positions = mt5.positions_get(symbol=self.ticker)
@@ -481,7 +486,7 @@ class LiveV7Trader:
             tick = mt5.symbol_info_tick(self.ticker)
             current_spread = (tick.ask - tick.bid) / self.pip_size if tick else 1.0
             now_hour = datetime.now(timezone.utc).hour
-            max_spread = 2.0 if self.ticker == 'AUDUSD' else 3.5
+            max_spread = 5.0 if self.ticker in ['XAUUSD', 'GOLD'] else (2.0 if self.ticker == 'AUDUSD' else 3.5)
             
             # If during daily rollover (21:00-22:00 UTC) with wide spread, defer market exit briefly
             if (21 <= now_hour <= 22 or current_spread > max_spread) and trade['candles_held'] == self.horizon:
@@ -675,7 +680,7 @@ Examples:
   python trade_live.py AUDUSD --risk 0.02
         """)
     parser.add_argument('ticker', type=str,
-                        choices=['USDJPY', 'GBPJPY', 'AUDUSD', 'EURUSD', 'GBPUSD'],
+                        choices=['USDJPY', 'GBPJPY', 'AUDUSD', 'XAUUSD', 'GOLD', 'EURUSD', 'GBPUSD'],
                         help='Trading symbol')
     parser.add_argument('--risk', type=float, default=0.02,
                         help='Risk per trade as fraction (0.02 = 2%%)')

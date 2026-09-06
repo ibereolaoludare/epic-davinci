@@ -55,6 +55,12 @@ PAIR_CONFIGS = {
         'regime_filter': ['mixed', 'risk_off', 'trend'],
         'depth': 5, 'lr': 0.05
     },
+    'XAUUSD': {
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 4,
+        'meta_threshold': 0.50,
+        'regime_filter': ['trend', 'range', 'risk_on'],
+        'depth': 5, 'lr': 0.05
+    },
 }
 
 
@@ -172,9 +178,13 @@ def main():
             TP_MULT, SL_MULT, HORIZON
         )
         session = get_session(times[j])
-        pip_size = 0.01 if ticker.endswith('JPY') else 0.0001
-        spread = (0.5 if session in ['London','NY','London/NY Overlap'] else 1.5) * pip_size
-        swap = (bars * 4/24) * 0.2 * pip_size
+        pip_size = 0.01 if ticker.endswith('JPY') else (0.10 if ticker in ['XAUUSD', 'GOLD'] else 0.0001)
+        if ticker in ['XAUUSD', 'GOLD']:
+            spread = (2.0 if session in ['London','NY','London/NY Overlap'] else 3.5) * pip_size
+            swap = (bars * 4/24) * 0.1 * pip_size
+        else:
+            spread = (0.5 if session in ['London','NY','London/NY Overlap'] else 1.5) * pip_size
+            swap = (bars * 4/24) * 0.2 * pip_size
         profit -= (spread + swap)
         pips = profit / pip_size
         skip_until = exit_idx + 1

@@ -38,6 +38,12 @@ PORTFOLIO_CONFIGS = {
         'meta_threshold': 0.50,
         'regime_filter': ['risk_on', 'trend'],
         'depth': 6, 'lr': 0.03
+    },
+    'XAUUSD': {
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 4,
+        'meta_threshold': 0.50,
+        'regime_filter': ['trend', 'range', 'risk_on'],
+        'depth': 5, 'lr': 0.05
     }
 }
 
@@ -63,7 +69,7 @@ def run_pair_walk_forward(ticker, cfg):
     rf = cfg['regime_filter']
     depth = cfg.get('depth', 5)
     lr = cfg.get('lr', 0.05)
-    pip_size = 0.01 if ticker.endswith('JPY') else 0.0001
+    pip_size = 0.01 if ticker.endswith('JPY') else (0.10 if ticker in ['XAUUSD', 'GOLD'] else 0.0001)
 
     all_trades = []
     PURGE_N = 12  # Target horizon — purge boundary rows to prevent label leakage
@@ -127,9 +133,13 @@ def run_pair_walk_forward(ticker, cfg):
             profit, exit_idx, bars = simulate_trade(
                 prices[j], j, int(d), prices, highs, lows, atrs, tp, sl, h)
             session = get_session(times[j])
-            spread_pips = 0.5 if session in ['London', 'NY', 'London/NY Overlap'] else 1.5
+            if ticker in ['XAUUSD', 'GOLD']:
+                spread_pips = 2.0 if session in ['London', 'NY', 'London/NY Overlap'] else 3.5
+                swap_cost = (bars * 4 / 24) * 0.1 * pip_size
+            else:
+                spread_pips = 0.5 if session in ['London', 'NY', 'London/NY Overlap'] else 1.5
+                swap_cost = (bars * 4 / 24) * 0.2 * pip_size
             spread_cost = spread_pips * pip_size
-            swap_cost = (bars * 4 / 24) * 0.2 * pip_size
             profit -= (spread_cost + swap_cost)
             pips = profit / pip_size
             skip_until = exit_idx + 1
@@ -171,6 +181,8 @@ def apply_portfolio_usd_cap(trades, max_usd_exposure=2):
         # Proposed trade USD direction
         if t['ticker'].endswith('JPY'):
             trade_usd_dir = 1 if t['direction'] == 1 else -1
+        elif t['ticker'] in ['XAUUSD', 'GOLD']:
+            trade_usd_dir = -1 if t['direction'] == 1 else 1
         else:
             trade_usd_dir = -1 if t['direction'] == 1 else 1
 
@@ -183,7 +195,7 @@ def apply_portfolio_usd_cap(trades, max_usd_exposure=2):
 
 
 def main():
-    pairs = sys.argv[1:] if len(sys.argv) > 1 else ['USDJPY', 'GBPJPY', 'AUDUSD']
+    pairs = sys.argv[1:] if len(sys.argv) > 1 else ['USDJPY', 'GBPJPY', 'AUDUSD', 'XAUUSD']
 
     print("=" * 75)
     print(f"PORTFOLIO WALK-FORWARD BACKTEST (V7) - BASKET: {pairs}")
@@ -285,7 +297,7 @@ def main():
         print(f"  {k}: {v:8.1f} pips  {bar}")
 
     # --- Position Sizing & 2% Dynamic Compounding Simulation ---
-    usd_per_pip_per_lot = {'USDJPY': 6.67, 'GBPJPY': 6.67, 'AUDUSD': 10.0, 'EURUSD': 10.0, 'GBPUSD': 10.0}
+    usd_per_pip_per_lot = {'USDJPY': 6.67, 'GBPJPY': 6.67, 'AUDUSD': 10.0, 'EURUSD': 10.0, 'GBPUSD': 10.0, 'XAUUSD': 10.0, 'GOLD': 10.0}
 
     # Simulation with $1,000 start
     initial_balance = 1000.0

@@ -32,5 +32,6 @@ echo Starting Live Trading for High-Carry Basket (USDJPY, GBPJPY, AUDUSD)...
 start "Live Trading - USDJPY" cmd /k ""%PY_EXE%" trade_live.py USDJPY --risk 0.02"
 start "Live Trading - GBPJPY" cmd /k ""%PY_EXE%" trade_live.py GBPJPY --risk 0.02"
 start "Live Trading - AUDUSD" cmd /k ""%PY_EXE%" trade_live.py AUDUSD --risk 0.02"
+start "Live Trading - XAUUSD" cmd /k ""%PY_EXE%" trade_live.py XAUUSD --risk 0.02"
 
-echo All 3 processes have been launched!
+echo All 4 processes have been launched!
