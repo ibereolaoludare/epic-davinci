@@ -22,21 +22,24 @@ warnings.filterwarnings('ignore')
 
 PORTFOLIO_CONFIGS = {
     'XAUUSD': {
-        'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 8,
-        'meta_threshold': 0.48,
-        'regime_filter': ['range'],
+        'tp_mult': 1.3, 'sl_mult': 1.0, 'horizon': 8,
+        'meta_threshold': 0.49,
+        'regime_filter': ['range', 'mixed'],
+        'use_adverse_exit': False,
         'depth': 5, 'lr': 0.05
     },
     'USDJPY': {
         'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 4,
         'meta_threshold': 0.52,
         'regime_filter': ['trend'],
+        'use_adverse_exit': True,
         'depth': 5, 'lr': 0.05
     },
     'GBPJPY': {
         'tp_mult': 1.3, 'sl_mult': 1.0, 'horizon': 4,
         'meta_threshold': 0.50,
         'regime_filter': ['range'],
+        'use_adverse_exit': True,
         'depth': 5, 'lr': 0.05
     },
     'AUDUSD': {
@@ -47,6 +50,7 @@ PORTFOLIO_CONFIGS = {
         'tp_mult': 1.25, 'sl_mult': 1.0, 'horizon': 8,
         'meta_threshold': 0.50,
         'regime_filter': None,
+        'use_adverse_exit': False,
         'depth': 5, 'lr': 0.05
     }
 }
@@ -157,8 +161,54 @@ def run_pair_walk_forward(ticker, cfg):
                     continue
                 trade_tp, trade_sl, trade_h = tp, sl, h
 
-            profit, exit_idx, bars = simulate_trade(
-                prices[j], j, int(d), prices, highs, lows, atrs, trade_tp, trade_sl, trade_h)
+            use_adverse_exit = cfg.get('use_adverse_exit', False)
+            entry_p = prices[j]
+            atr = atrs[j]
+            if atr <= 0 or np.isnan(atr):
+                continue
+            tp_p = entry_p + (atr * trade_tp) if d == 1 else entry_p - (atr * trade_tp)
+            sl_p = entry_p - (atr * trade_sl) if d == 1 else entry_p + (atr * trade_sl)
+
+            profit = 0
+            exit_idx = j + trade_h
+            bars = trade_h
+
+            for b in range(1, trade_h + 1):
+                idx = j + b
+                if idx >= len(prices):
+                    break
+                if d == 1:
+                    if highs[idx] >= tp_p:
+                        profit = tp_p - entry_p
+                        exit_idx = idx
+                        bars = b
+                        break
+                    elif lows[idx] <= sl_p:
+                        profit = sl_p - entry_p
+                        exit_idx = idx
+                        bars = b
+                        break
+                else:
+                    if lows[idx] <= tp_p:
+                        profit = entry_p - tp_p
+                        exit_idx = idx
+                        bars = b
+                        break
+                    elif highs[idx] >= sl_p:
+                        profit = entry_p - sl_p
+                        exit_idx = idx
+                        bars = b
+                        break
+
+                if use_adverse_exit and pri_te[idx] == -d and meta_probs[idx] >= 0.52:
+                    profit = (prices[idx] - entry_p) if d == 1 else (entry_p - prices[idx])
+                    exit_idx = idx
+                    bars = b
+                    break
+            else:
+                exit_idx = min(j + trade_h, len(prices) - 1)
+                profit = (prices[exit_idx] - entry_p) if d == 1 else (entry_p - prices[exit_idx])
+
             session = get_session(times[j])
             if ticker in ['XAUUSD', 'GOLD']:
                 spread_pips = 2.0 if session in ['London', 'NY', 'London/NY Overlap'] else 3.5
@@ -173,6 +223,11 @@ def run_pair_walk_forward(ticker, cfg):
 
             exit_time = times[min(exit_idx, len(times)-1)]
             trade_sl_pips = (atrs[j] * trade_sl) / pip_size
+
+            # Currency matrix exposure direction
+            usd_dir = (1 if d == 1 else -1) if ticker == 'USDJPY' else (-1 if d == 1 else 1 if ticker in ['AUDUSD', 'XAUUSD', 'GOLD'] else 0)
+            jpy_dir = (-1 if d == 1 else 1) if ticker in ['USDJPY', 'GBPJPY'] else 0
+
             all_trades.append({
                 'ticker': ticker,
                 'entry_time': times[j],
@@ -186,43 +241,48 @@ def run_pair_walk_forward(ticker, cfg):
                 'sl_pips': trade_sl_pips,
                 'tp': trade_tp,
                 'sl': trade_sl,
+                'usd_dir': usd_dir,
+                'jpy_dir': jpy_dir,
             })
 
     return all_trades
 
 
-def apply_portfolio_usd_cap(trades, max_usd_exposure=2):
+def apply_portfolio_currency_matrix_cap(trades, max_usd_exposure=2, max_jpy_exposure=2):
     """
-    Filter chronological portfolio trades by the USD directional exposure cap.
-    Long USDJPY / Short EURUSD / Short GBPUSD = +1 Long USD exposure.
-    Short USDJPY / Long EURUSD / Long GBPUSD = -1 Short USD exposure.
+    Filter chronological portfolio trades by the dual currency matrix exposure cap.
+    - USDJPY: +1 USD, -1 JPY (if long) / -1 USD, +1 JPY (if short)
+    - GBPJPY:  0 USD, -1 JPY (if long) /  0 USD, +1 JPY (if short)
+    - AUDUSD: -1 USD,  0 JPY (if long) / +1 USD,  0 JPY (if short)
+    - XAUUSD: -1 USD,  0 JPY (if long) / +1 USD,  0 JPY (if short)
+    Enforces simultaneous limits: |net_usd| <= max_usd_exposure and |net_jpy| <= max_jpy_exposure.
     """
     sorted_trades = sorted(trades, key=lambda t: t['entry_time'])
     accepted_trades = []
-    active_positions = []  # list of (exit_time, usd_direction)
+    active_positions = []  # list of (exit_time, usd_dir, jpy_dir)
 
     for t in sorted_trades:
         entry_t = t['entry_time']
         # Prune positions that have already closed before entry_t
-        active_positions = [p for p in active_positions if p[0] > entry_t]
+        active_positions = [pos for pos in active_positions if pos[0] > entry_t]
 
-        # Calculate current net USD exposure
-        current_usd_exp = sum(p[1] for p in active_positions)
+        # Calculate current net USD & JPY exposures
+        curr_usd = sum(pos[1] for pos in active_positions)
+        curr_jpy = sum(pos[2] for pos in active_positions)
 
-        # Proposed trade USD direction
-        if t['ticker'].endswith('JPY'):
-            trade_usd_dir = 1 if t['direction'] == 1 else -1
-        elif t['ticker'] in ['XAUUSD', 'GOLD']:
-            trade_usd_dir = -1 if t['direction'] == 1 else 1
-        else:
-            trade_usd_dir = -1 if t['direction'] == 1 else 1
+        new_usd = curr_usd + t.get('usd_dir', 0)
+        new_jpy = curr_jpy + t.get('jpy_dir', 0)
 
-        # Check cap
-        if abs(current_usd_exp + trade_usd_dir) <= max_usd_exposure:
+        # Check dual cap
+        if abs(new_usd) <= max_usd_exposure and abs(new_jpy) <= max_jpy_exposure:
             accepted_trades.append(t)
-            active_positions.append((t['exit_time'], trade_usd_dir))
+            active_positions.append((t['exit_time'], t.get('usd_dir', 0), t.get('jpy_dir', 0)))
 
     return accepted_trades
+
+
+# Backward-compatible alias
+apply_portfolio_usd_cap = apply_portfolio_currency_matrix_cap
 
 
 def main():
@@ -260,8 +320,8 @@ def main():
                   f"PnL={pnl:.1f} | PF={pf:.2f} | p={p_val:.4f} "
                   f"{'***' if p_val < 0.05 else ''}")
 
-    # By default, run uncapped (all pairs allowed simultaneously)
-    all_trades = all_raw_trades
+    # Apply Dual Currency Matrix Cap (Max 2 USD, Max 2 JPY positions)
+    all_trades = apply_portfolio_currency_matrix_cap(all_raw_trades, max_usd_exposure=2, max_jpy_exposure=2)
 
     # --- Portfolio Aggregation ---
     print("\n" + "=" * 75)
@@ -343,14 +403,17 @@ def main():
     for t in all_trades:
         pip_val = usd_per_pip_per_lot.get(t['ticker'], 10.0)
         trade_sl = max(10.0, t.get('sl_pips', avg_loss_pips))
+        conf = t.get('meta_conf', 0.50)
+        # Fractional conviction scaling: 1.5% base to 2.5% max for high confidence
+        risk_pct = 0.015 + max(0.0, min(0.010, (conf - 0.50) * 0.10))
         # Fixed 2% risk based on initial balance
         fixed_lot = max(0.01, round((initial_balance * 0.02) / (trade_sl * pip_val), 2))
         fixed_pnl = t['pips'] * pip_val * fixed_lot
         fixed_balance += fixed_pnl
         fixed_equity_curve.append(fixed_balance)
 
-        # Dynamic 2% compounding risk
-        comp_lot = max(0.01, round((comp_balance * 0.02) / (trade_sl * pip_val), 2))
+        # Dynamic conviction compounding risk
+        comp_lot = max(0.01, round((comp_balance * risk_pct) / (trade_sl * pip_val), 2))
         comp_pnl = t['pips'] * pip_val * comp_lot
         comp_balance += comp_pnl
         comp_equity_curve.append(comp_balance)
@@ -360,9 +423,9 @@ def main():
     comp_dds = (comp_peak - np.array(comp_equity_curve)) / comp_peak * 100
     max_comp_dd_pct = np.max(comp_dds)
 
-    print(f"\n--- 2% Dynamic Compounding Performance ($1,000 Start) ---")
+    print(f"\n--- Dynamic Auto-Compounding Performance ($1,000 Start) ---")
     print(f"  Fixed Lot Final Balance:       ${fixed_balance:,.2f} ({((fixed_balance/initial_balance)-1)*100:+.1f}%)")
-    print(f"  Dynamic Compounding Balance:   ${comp_balance:,.2f} ({((comp_balance/initial_balance)-1)*100:+.1f}%)")
+    print(f"  Dynamic Conviction Balance:    ${comp_balance:,.2f} ({((comp_balance/initial_balance)-1)*100:+.1f}%)")
     print(f"  Max Compounding Drawdown:      {max_comp_dd_pct:.2f}%")
     print(f"  Avg Win: {avg_win_pips:.1f} pips | Avg Loss: {avg_loss_pips:.1f} pips")
 

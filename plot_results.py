@@ -27,7 +27,7 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-from run_portfolio import PORTFOLIO_CONFIGS, run_pair_walk_forward, apply_portfolio_usd_cap
+from run_portfolio import PORTFOLIO_CONFIGS, run_pair_walk_forward, apply_portfolio_currency_matrix_cap
 
 COLORS = {
     'USDJPY': '#e74c3c',
@@ -63,6 +63,9 @@ def collect_trades(pairs):
         all_trades.extend(trades)
         
     all_trades.sort(key=lambda t: t['entry_time'])
+    if len(pairs) > 1:
+        all_trades = apply_portfolio_currency_matrix_cap(all_trades, max_usd_exposure=2, max_jpy_exposure=2)
+        per_pair = {p: [t for t in all_trades if t['ticker'] == p] for p in pairs}
     return all_trades, per_pair
 
 

@@ -1,12 +1,14 @@
 {
   "ticker": "XAUUSD",
-  "tp_mult": 1.2,
+  "tp_mult": 1.3,
   "sl_mult": 1.0,
   "horizon": 8,
-  "meta_threshold": 0.48,
+  "meta_threshold": 0.49,
   "regime_filter": [
-    "range"
+    "range",
+    "mixed"
   ],
+  "modes": null,
   "feature_cols": [
     "Time_Of_Day_Sin",
     "Time_Of_Day_Cos",

@@ -56,14 +56,22 @@ def load_config(ticker):
     return cfg, primary, meta
 
 
-def calc_lot_size(account_balance, risk_pct, sl_pips, pip_value_per_lot, info=None):
+def calc_lot_size(account_balance, risk_pct, sl_pips, pip_value_per_lot=10.0, info=None, pip_size=0.0001):
     """
-    Quantize lot size using broker's volume_step and enforce strict risk limits.
+    Exact broker lot sizing: Volume = (Balance * Risk) / ((Entry - SL) * (TickValue / TickSize))
+    Quantizes downward using broker volume_step and enforces volume_min / volume_max.
     Prevents blowing risk rules on small accounts.
     """
     risk_amount = account_balance * risk_pct
-    raw_lot = risk_amount / (sl_pips * pip_value_per_lot)
-    
+    if info and hasattr(info, 'trade_tick_value') and hasattr(info, 'trade_tick_size') and info.trade_tick_value > 0 and info.trade_tick_size > 0:
+        sl_dist = sl_pips * pip_size
+        value_per_unit = info.trade_tick_value / info.trade_tick_size
+        raw_lot = risk_amount / (sl_dist * value_per_unit) if (sl_dist * value_per_unit) > 0 else 0.0
+        effective_pip_value = value_per_unit * pip_size
+    else:
+        raw_lot = risk_amount / (sl_pips * pip_value_per_lot) if (sl_pips * pip_value_per_lot) > 0 else 0.0
+        effective_pip_value = pip_value_per_lot
+
     step = info.volume_step if (info and hasattr(info, 'volume_step') and info.volume_step > 0) else 0.01
     min_lot = info.volume_min if (info and hasattr(info, 'volume_min') and info.volume_min > 0) else 0.01
     max_lot = info.volume_max if (info and hasattr(info, 'volume_max') and info.volume_max > 0) else 100.0
@@ -72,8 +80,7 @@ def calc_lot_size(account_balance, risk_pct, sl_pips, pip_value_per_lot, info=No
     lot = np.floor(raw_lot / step) * step
 
     if lot < min_lot:
-        # Check if broker minimum lot would cause excessive risk (> 1.5x of risk target)
-        actual_risk_pct = (min_lot * sl_pips * pip_value_per_lot) / account_balance if account_balance > 0 else 0
+        actual_risk_pct = (min_lot * sl_pips * effective_pip_value) / account_balance if account_balance > 0 else 0
         if actual_risk_pct > (risk_pct * 1.5):
             log.warning(f"Calculated lot ({raw_lot:.4f}) is below broker min ({min_lot}). "
                         f"Min lot would risk {actual_risk_pct*100:.1f}% (> target {risk_pct*100:.1f}%). Trade skipped.")
@@ -173,11 +180,11 @@ class LiveV7Trader:
             return (100000.0 * 0.01) / price
         return 10.0
 
-    def check_portfolio_usd_exposure(self, proposed_direction):
+    def check_portfolio_currency_matrix_exposure(self, proposed_direction, proposed_risk=None):
         """
-        Safeguard: Prevents opening excessive simultaneous trades in the same USD direction.
-        Long USDJPY / Short EURUSD / Short GBPUSD = +1 Long USD exposure.
-        Short USDJPY / Long EURUSD / Long GBPUSD = -1 Short USD exposure.
+        Safeguard: Dual Currency Matrix Exposure and Portfolio Heat Cap.
+        Caps net USD positions at <= 2 and net JPY positions at <= 2.
+        Also caps total portfolio heat at <= 4.5% of account balance.
         """
         if not self.mt5:
             return True
@@ -186,28 +193,66 @@ class LiveV7Trader:
             return True
             
         usd_exposure = 0
+        jpy_exposure = 0
+        total_risk_exposure = 0.0
+
         for pos in positions:
             if pos.magic == 234000:
                 sym = pos.symbol
                 is_buy = (pos.type == self.mt5.ORDER_TYPE_BUY)
-                if sym.endswith('JPY'):
-                    usd_exposure += 1 if is_buy else -1
-                else:  # AUDUSD, EURUSD, GBPUSD, XAUUSD (USD is quote currency)
-                    usd_exposure += -1 if is_buy else 1
-                    
-        # Calculate proposed new exposure for this trade
-        if self.ticker.endswith('JPY'):
-            new_exp = 1 if proposed_direction == 1 else -1
-        else:
-            new_exp = -1 if proposed_direction == 1 else 1
-            
-        total_exp = usd_exposure + new_exp
-        MAX_USD_EXPOSURE = 4  # Uncapped mode: Allows all 4 assets to trade simultaneously
-        if abs(total_exp) > MAX_USD_EXPOSURE:
-            log.warning(f"Portfolio USD Exposure Cap reached (Current={usd_exposure}, Proposed={new_exp}, Max={MAX_USD_EXPOSURE}). "
+                d = 1 if is_buy else -1
+
+                # USD delta
+                if sym == 'USDJPY':
+                    usd_exposure += 1 if d == 1 else -1
+                elif sym in ['AUDUSD', 'XAUUSD', 'GOLD', 'EURUSD', 'GBPUSD']:
+                    usd_exposure += -1 if d == 1 else 1
+
+                # JPY delta
+                if sym in ['USDJPY', 'GBPJPY']:
+                    jpy_exposure += -1 if d == 1 else 1
+
+                # Calculate position dollar risk for portfolio heat limit
+                if pos.sl > 0:
+                    sl_dist = abs(pos.price_open - pos.sl)
+                    sym_info = self.mt5.symbol_info(sym)
+                    if sym_info and sym_info.trade_tick_value > 0 and sym_info.trade_tick_size > 0:
+                        pos_risk = (sl_dist * (sym_info.trade_tick_value / sym_info.trade_tick_size)) * pos.volume
+                    else:
+                        pos_risk = pos.volume * 10.0 * 40.0
+                    total_risk_exposure += pos_risk
+
+        # Proposed trade deltas
+        prop_usd = (1 if proposed_direction == 1 else -1) if self.ticker == 'USDJPY' else (-1 if proposed_direction == 1 else 1 if self.ticker in ['AUDUSD', 'XAUUSD', 'GOLD'] else 0)
+        prop_jpy = (-1 if proposed_direction == 1 else 1) if self.ticker in ['USDJPY', 'GBPJPY'] else 0
+
+        new_usd = usd_exposure + prop_usd
+        new_jpy = jpy_exposure + prop_jpy
+
+        MAX_USD = 2
+        MAX_JPY = 2
+        if abs(new_usd) > MAX_USD:
+            log.warning(f"Portfolio USD Exposure Cap reached (Current={usd_exposure}, Proposed={prop_usd:+d}, Max={MAX_USD}). "
                         f"Skipping trade to prevent correlated USD drawdown.")
             return False
+
+        if abs(new_jpy) > MAX_JPY:
+            log.warning(f"Portfolio JPY Exposure Cap reached (Current={jpy_exposure}, Proposed={prop_jpy:+d}, Max={MAX_JPY}). "
+                        f"Skipping trade to prevent correlated JPY drawdown.")
+            return False
+
+        # Check total portfolio heat (max 4.5% of account balance)
+        risk_val = proposed_risk if proposed_risk is not None else (self.account_balance * self.risk_pct)
+        if self.account_balance > 0 and (total_risk_exposure + risk_val) / self.account_balance > 0.045:
+            heat_pct = (total_risk_exposure + risk_val) / self.account_balance * 100
+            log.warning(f"Portfolio Heat Cap exceeded (Current heat=${total_risk_exposure:.2f}, Proposed=${risk_val:.2f}, "
+                        f"Total heat={heat_pct:.1f}% > 4.5% limit). Skipping trade to preserve capital.")
+            return False
+
         return True
+
+    # Backward-compatible alias
+    check_portfolio_usd_exposure = check_portfolio_currency_matrix_exposure
 
     def connect(self):
         import MetaTrader5 as mt5
@@ -281,7 +326,7 @@ class LiveV7Trader:
                     log.warning(f"Background thread: Macro refresh failed: {e}")
             threading.Thread(target=_worker, daemon=True).start()
 
-    def fetch_candles(self, n=1000):
+    def fetch_candles(self, n=300):
         # Auto-reconnect if terminal disconnected
         if not self.mt5 or not self.mt5.terminal_info():
             log.warning("MT5 terminal connection lost. Reconnecting...")
@@ -448,7 +493,7 @@ class LiveV7Trader:
         log.info(f"CLOSED ticket {ticket} ({reason}) @ {price:.5f}")
         return True
 
-    def manage_active_trade(self):
+    def manage_active_trade(self, feat_row=None):
         if not self.active_trade:
             return
 
@@ -483,6 +528,17 @@ class LiveV7Trader:
             self.active_trade = None
             self.save_state()
             return
+
+        # Check Adverse Signal Exit (For USDJPY and GBPJPY)
+        if feat_row is not None and self.cfg.get('use_adverse_exit', False):
+            direction, meta_conf, _ = self.get_signal(feat_row)
+            if direction == -trade['direction'] and meta_conf >= 0.52:
+                log.warning(f"ADVERSE MODEL FLIP DETECTED (New Dir={direction}, Active Dir={trade['direction']}, "
+                            f"Meta Conf={meta_conf:.3f} >= 0.52). Early cutting position to prevent adverse loss...")
+                self.close_position(trade['ticket'], 'adverse_signal_exit')
+                self.active_trade = None
+                self.save_state()
+                return
 
         trade_horizon = trade.get('horizon', self.horizon)
         if trade['candles_held'] >= trade_horizon:
@@ -538,15 +594,22 @@ class LiveV7Trader:
                     target = now.replace(minute=0, second=2, microsecond=0) + timedelta(hours=(next_hour - now.hour))
                     seconds_to_next = (target - now).total_seconds()
 
-                if seconds_to_next > 0:
+                if seconds_to_next > 65:
+                    sleep_first = seconds_to_next - 60
                     log.info(f"Next H4 close in {int(seconds_to_next)//60}m{int(seconds_to_next)%60}s. "
-                             f"Sleeping...")
+                             f"Sleeping {int(sleep_first)//60}m{int(sleep_first)%60}s until macro pre-fetch window...")
+                    time.sleep(sleep_first)
+                    self.refresh_alternative_data_if_needed()
+                    # Sleep remaining seconds until candle close
+                    now = datetime.now(timezone.utc)
+                    rem = max(0, (target - now).total_seconds())
+                    if rem > 0:
+                        time.sleep(rem)
+                elif seconds_to_next > 0:
                     time.sleep(seconds_to_next)
 
-                self.refresh_alternative_data_if_needed()
-
-                log.info("Fetching H4 candles...")
-                df = self.fetch_candles(1000)
+                log.info("Fetching H4 candles (rolling 300 buffer)...")
+                df = self.fetch_candles(300)
                 if len(df) < 200:
                     log.error(f"Only {len(df)} candles, need 200+")
                     time.sleep(60)
@@ -560,16 +623,17 @@ class LiveV7Trader:
                 
                 last_processed_time = latest_time
 
-                self.manage_active_trade()
-
-                if self.active_trade:
-                    log.info("Position active, skipping new entry.")
-                    continue
-
                 log.info("Computing V7 features...")
                 feat_df = self.compute_features(df)
                 if feat_df is None or feat_df.empty:
                     log.error("Feature computation returned empty")
+                    continue
+
+                latest = feat_df.iloc[-1]
+                self.manage_active_trade(latest)
+
+                if self.active_trade:
+                    log.info("Position active, skipping new entry.")
                     continue
 
                 latest = feat_df.iloc[-1]
@@ -652,14 +716,19 @@ class LiveV7Trader:
                                 f"Locking out new entries for 24h (until {self.circuit_breaker_lockout_until.strftime('%Y-%m-%d %H:%M UTC')}). State saved to disk.")
                     continue
 
-                # Portfolio-level risk check: ensure we do not over-expose in the same USD direction
-                if not self.check_portfolio_usd_exposure(direction):
-                    continue
+                # Fractional conviction scaling: 1.5% to 2.5% based on meta conviction
+                conviction_risk = 0.015 + max(0.0, min(0.010, (meta_conf - 0.50) * 0.10))
 
                 # Query live account balance for dynamic auto-compounding
                 acc = self.mt5.account_info()
                 if acc and acc.balance > 0:
                     self.account_balance = acc.balance
+
+                proposed_risk_usd = self.account_balance * conviction_risk
+
+                # Portfolio-level risk check: ensure we do not over-expose USD/JPY or exceed 4.5% total heat
+                if not self.check_portfolio_currency_matrix_exposure(direction, proposed_risk=proposed_risk_usd):
+                    continue
 
                 # Query real-time pip value & broker constraints
                 pip_val = self.get_pip_value()
@@ -668,8 +737,8 @@ class LiveV7Trader:
                     close_price, atr, direction, tp_mult=trade_tp_mult, sl_mult=trade_sl_mult)
                 sl_pips = abs(close_price - sl_price) / self.pip_size
                 lot = calc_lot_size(
-                    self.account_balance, self.risk_pct,
-                    sl_pips, pip_val, info=info)
+                    self.account_balance, conviction_risk,
+                    sl_pips, pip_value_per_lot=pip_val, info=info, pip_size=self.pip_size)
 
                 if lot <= 0.0:
                     log.info("Lot sizing calculated to 0.0 (minimum risk guard). Skipping trade.")
@@ -678,7 +747,7 @@ class LiveV7Trader:
                 log.info(f"Entry signal: {('LONG' if direction==1 else 'SHORT')} "
                          f"| SL={sl_pips:.1f} pips | "
                          f"TP={abs(tp_price-close_price)/self.pip_size:.1f} pips | "
-                         f"Lot={lot} | PipVal=${pip_val:.2f} | Risk=${self.account_balance*self.risk_pct:.2f}")
+                         f"Lot={lot} | PipVal=${pip_val:.2f} | Risk={conviction_risk*100:.1f}% (${proposed_risk_usd:.2f})")
 
                 comment_str = f'V7 {int(trade_tp_mult*10)}x{int(trade_sl_mult*10)}'
                 ticket = self.execute_trade(direction, sl_price, tp_price, lot, comment=comment_str)

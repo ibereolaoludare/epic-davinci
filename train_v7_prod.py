@@ -27,9 +27,9 @@ from backtest_v7 import get_oof_predictions
 # Per-pair production configs (execution params, not training-label params)
 PAIR_CONFIGS = {
     'XAUUSD': {
-        'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 8,
-        'meta_threshold': 0.48,
-        'regime_filter': ['range'],
+        'tp_mult': 1.3, 'sl_mult': 1.0, 'horizon': 8,
+        'meta_threshold': 0.49,
+        'regime_filter': ['range', 'mixed'],
         'depth': 5, 'lr': 0.05
     },
     'USDJPY': {
