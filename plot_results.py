@@ -100,25 +100,49 @@ def plot_equity_curve(all_trades, savepath):
 
 
 def plot_drawdown(all_trades, savepath):
-    fig, ax = plt.subplots(figsize=(14, 4))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
 
     times = [pd.Timestamp(t['entry_time']) for t in all_trades]
     cum = np.cumsum([t['pips'] for t in all_trades])
     running_max = np.maximum.accumulate(cum)
     drawdown = cum - running_max
+    mdd_pips = drawdown.min() if len(drawdown) > 0 else 0
 
-    ax.fill_between(times, drawdown, 0, color=COLORS['loss'], alpha=0.4)
-    ax.plot(times, drawdown, color=COLORS['loss'], linewidth=1.5)
+    ax1.fill_between(times, drawdown, 0, color=COLORS['loss'], alpha=0.4)
+    ax1.plot(times, drawdown, color=COLORS['loss'], linewidth=1.5)
+    ax1.set_title(f'Underwater Drawdown Curve — Max Pip DD: {mdd_pips:.0f} pips (dominated by XAUUSD 200pt ATR)',
+                  fontsize=13, fontweight='bold')
+    ax1.set_ylabel('Pip Drawdown', fontsize=11)
+    ax1.grid(True, alpha=0.3)
 
-    mdd = drawdown.min() if len(drawdown) > 0 else 0
-    ax.set_title(f'Underwater Drawdown Curve — Max DD: {mdd:.0f} pips',
-                 fontsize=14, fontweight='bold')
-    ax.set_ylabel('Drawdown (pips)', fontsize=11)
-    ax.set_xlabel('Date', fontsize=11)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    # Compounding account equity drawdown
+    comp_balance = 1000.0
+    comp_curve = [comp_balance]
+    usd_per_pip = {'USDJPY': 6.67, 'GBPJPY': 6.67, 'AUDUSD': 10.0, 'XAUUSD': 10.0}
+    for t in all_trades:
+        pip_val = usd_per_pip.get(t['ticker'], 10.0)
+        conf = t.get('meta_conf', 0.50)
+        risk_pct = 0.015 + max(0.0, min(0.010, (conf - 0.50) * 0.10))
+        trade_sl = max(10.0, t.get('sl_pips', 40.0))
+        lot = max(0.01, round((comp_balance * risk_pct) / (trade_sl * pip_val), 2))
+        comp_balance += t['pips'] * pip_val * lot
+        comp_curve.append(comp_balance)
+
+    comp_peak = np.maximum.accumulate(comp_curve[1:])
+    comp_dd = (np.array(comp_curve[1:]) - comp_peak) / comp_peak * 100
+    mdd_pct = comp_dd.min() if len(comp_dd) > 0 else 0
+
+    ax2.fill_between(times, comp_dd, 0, color='#e67e22', alpha=0.4)
+    ax2.plot(times, comp_dd, color='#d35400', linewidth=1.5)
+    ax2.set_title(f'Normalized Account Equity Drawdown — Max: {mdd_pct:.1f}% (2% Risk Compounding Model)',
+                  fontsize=13, fontweight='bold')
+    ax2.set_ylabel('Account DD (%)', fontsize=11)
+    ax2.set_xlabel('Date', fontsize=11)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
     plt.xticks(rotation=45)
-    ax.grid(True, alpha=0.3)
+    ax2.grid(True, alpha=0.3)
+
     fig.tight_layout()
     fig.savefig(savepath, dpi=150)
     plt.close(fig)
@@ -275,9 +299,17 @@ def plot_regime_breakdown(per_pair, savepath):
     print(f"  Saved {savepath}")
 
 
-def plot_trade_scatter(all_trades, savepath):
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
-    pairs = ['USDJPY', 'EURUSD', 'GBPUSD']
+def plot_trade_scatter(all_trades, savepath, pairs=None):
+    if pairs is None:
+        pairs = ['USDJPY', 'GBPJPY', 'AUDUSD', 'XAUUSD']
+    pairs = [p for p in pairs if any(t['ticker'] == p for t in all_trades)]
+    n_pairs = len(pairs)
+    if n_pairs == 0:
+        return
+
+    fig, axes = plt.subplots(1, n_pairs, figsize=(5 * n_pairs, 5), sharey=True)
+    if n_pairs == 1:
+        axes = [axes]
 
     for i, pair in enumerate(pairs):
         ax = axes[i]
@@ -291,13 +323,14 @@ def plot_trade_scatter(all_trades, savepath):
 
         ax.scatter([t['meta_conf'] for t in wins],
                    [t['pips'] for t in wins],
-                   c=COLORS['win'], alpha=0.6, s=20, label=f'Win ({len(wins)})')
+                   c=COLORS['win'], alpha=0.6, s=24, label=f'Win ({len(wins)})')
         ax.scatter([t['meta_conf'] for t in losses],
                    [t['pips'] for t in losses],
-                   c=COLORS['loss'], alpha=0.6, s=20, label=f'Loss ({len(losses)})')
+                   c=COLORS['loss'], alpha=0.6, s=24, label=f'Loss ({len(losses)})')
 
         ax.axhline(0, color='gray', linewidth=0.8, linestyle='--')
-        ax.axvline(0.40, color='orange', linewidth=1, linestyle=':', label='Threshold 0.40')
+        thresh = PORTFOLIO_CONFIGS.get(pair, {}).get('meta_threshold', 0.50)
+        ax.axvline(thresh, color='orange', linewidth=1, linestyle=':', label=f'Threshold {thresh:.2f}')
 
         n = len(trades)
         wr = sum(t['win'] for t in trades) / n * 100
@@ -354,41 +387,60 @@ def plot_summary_dashboard(all_trades, per_pair, savepath):
                      for t in all_trades])
     p_val = 1 - stats.binom.cdf(wins - 1, n, be_wr) if n > 0 else 1
 
+    # Calculate compounding equity max drawdown
+    comp_balance = 1000.0
+    comp_curve = [comp_balance]
+    usd_per_pip = {'USDJPY': 6.67, 'GBPJPY': 6.67, 'AUDUSD': 10.0, 'XAUUSD': 10.0}
+    for t in all_trades:
+        pip_val = usd_per_pip.get(t['ticker'], 10.0)
+        conf = t.get('meta_conf', 0.50)
+        risk_pct = 0.015 + max(0.0, min(0.010, (conf - 0.50) * 0.10))
+        trade_sl = max(10.0, t.get('sl_pips', 40.0))
+        lot = max(0.01, round((comp_balance * risk_pct) / (trade_sl * pip_val), 2))
+        pnl_trade = t['pips'] * pip_val * lot
+        comp_balance += pnl_trade
+        comp_curve.append(comp_balance)
+    comp_peak = np.maximum.accumulate(comp_curve)
+    comp_dd_arr = (comp_peak - np.array(comp_curve)) / comp_peak * 100
+    comp_mdd = np.max(comp_dd_arr) if len(comp_dd_arr) > 0 else 0.0
+
     stats_text = (
         f"PORTFOLIO SUMMARY\n\n"
-        f"  Total Trades:  {n}\n"
-        f"  Win Rate:      {wr:.1f}%\n"
-        f"  Break-Even WR: {be_wr*100:.1f}%\n"
-        f"  Net PnL:       {total_pnl:+.0f} pips\n"
-        f"  Profit Factor: {pf:.2f}\n"
-        f"  Max Drawdown:  {mdd:.0f} pips\n"
-        f"  Expectancy:    {exp:.2f} pips/trade\n"
-        f"  p-value:       {p_val:.6f}\n"
-        f"  Significance:  {'*** SIGNIFICANT' if p_val < 0.05 else 'not sig.'}\n"
+        f"  Total Trades:   {n}\n"
+        f"  Win Rate:       {wr:.1f}%\n"
+        f"  Break-Even WR:  {be_wr*100:.1f}%\n"
+        f"  Net PnL:        {total_pnl:+.0f} pips\n"
+        f"  Profit Factor:  {pf:.2f}\n"
+        f"  Pip Max DD:     {mdd:.0f} pips\n"
+        f"  Account Max DD: {comp_mdd:.1f}% (comp)\n"
+        f"  Expectancy:     {exp:.2f} pips/tr\n"
+        f"  p-value:        {p_val:.6f}\n"
+        f"  Significance:   {'*** SIGNIFICANT' if p_val < 0.05 else 'not sig.'}\n"
     )
     ax2.text(0.1, 0.9, stats_text, transform=ax2.transAxes,
-             fontsize=12, fontfamily='monospace', verticalalignment='top',
+             fontsize=11.5, fontfamily='monospace', verticalalignment='top',
              bbox=dict(boxstyle='round', facecolor='#ecf0f1', alpha=0.8))
 
     # 3. Monthly PnL (middle left)
     ax3 = fig.add_subplot(gs[1, :2])
+    all_months = sorted(list(set([pd.Timestamp(t['entry_time']).strftime('%Y-%m') for t in all_trades])))
     monthly = {}
     for t in all_trades:
         key = pd.Timestamp(t['entry_time']).strftime('%Y-%m')
         monthly[key] = monthly.get(key, 0) + t['pips']
-    months = sorted(monthly.keys())
-    vals = [monthly[m] for m in months]
-    colors = [COLORS['win'] if v > 0 else COLORS['loss'] for v in vals]
-    ax3.bar(range(len(vals)), vals, color=colors, edgecolor='white')
+    vals = [monthly.get(m, 0.0) for m in all_months]
+    colors = [COLORS['win'] if v > 0 else (COLORS['loss'] if v < 0 else '#bdc3c7') for v in vals]
+    ax3.bar(range(len(all_months)), vals, color=colors, edgecolor='white', linewidth=0.5)
     ax3.axhline(0, color='gray', linewidth=0.8)
-    ax3.set_xticks(range(len(months)))
-    ax3.set_xticklabels(months, rotation=45, ha='right', fontsize=8)
+    ax3.set_xticks(range(len(all_months)))
+    ax3.set_xticklabels(all_months, rotation=45, ha='right', fontsize=8)
     ax3.set_title('Monthly Portfolio PnL', fontsize=13, fontweight='bold')
     ax3.set_ylabel('PnL (pips)')
     ax3.grid(True, alpha=0.2, axis='y')
     for j, v in enumerate(vals):
-        ax3.text(j, v + (5 if v > 0 else -8), f'{v:.0f}',
-                 ha='center', fontsize=7, fontweight='bold')
+        if abs(v) > 0.01:
+            ax3.text(j, v + (5 if v > 0 else -8), f'{v:.0f}',
+                     ha='center', fontsize=7, fontweight='bold')
 
     # 4. Per-pair pie (middle right)
     ax4 = fig.add_subplot(gs[1, 2])
@@ -412,7 +464,7 @@ def plot_summary_dashboard(all_trades, per_pair, savepath):
     dd = cum - rmax
     ax5.fill_between(times, dd, 0, color=COLORS['loss'], alpha=0.4)
     ax5.plot(times, dd, color=COLORS['loss'], linewidth=1)
-    ax5.set_title(f'Drawdown — Max: {mdd:.0f} pips', fontsize=13, fontweight='bold')
+    ax5.set_title(f'Drawdown — Max Pip DD: {mdd:.0f} pips | Account Max DD: {comp_mdd:.1f}%', fontsize=13, fontweight='bold')
     ax5.set_ylabel('Drawdown (pips)')
     ax5.set_xlabel('Date')
     ax5.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
