@@ -3,9 +3,8 @@
   "tp_mult": 2.0,
   "sl_mult": 1.0,
   "horizon": 6,
-  "meta_threshold": 0.5,
+  "meta_threshold": 0.52,
   "regime_filter": [
-    "trend",
     "range",
     "risk_on"
   ],
@@ -70,6 +69,6 @@
     "Carry_Score",
     "VIX_USDJPY_Divergence"
   ],
-  "train_end": "2026-07-01 16:00:00+00:00",
-  "holdout_start": "2026-07-04 20:00:00+00:00"
+  "train_end": "2026-06-30 16:00:00+00:00",
+  "holdout_start": "2026-07-02 20:00:00+00:00"
 }

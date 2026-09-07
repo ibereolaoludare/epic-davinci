@@ -385,8 +385,8 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_
     TP_ATR_MULT = 2.0    # Take profit at 2x ATR (training label TP)
     SL_ATR_MULT = 1.0    # Stop loss at 1x ATR (training label SL)
 
-    targets = np.zeros(len(df))
-    primary_labels = np.zeros(len(df))  # raw direction (for meta-labeling)
+    targets = np.full(len(df), np.nan)
+    primary_labels = np.full(len(df), np.nan)  # raw direction (for meta-labeling)
 
     close = df['Close'].values
     high = df['High'].values
@@ -404,57 +404,55 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_
         upper_short = cc - (ca * TP_ATR_MULT)
         lower_short = cc + (ca * SL_ATR_MULT)
 
-        long_hit = False
-        short_hit = False
-        long_tp = False
-        short_tp = False
-
+        # 1. Evaluate Long outcome independently
+        long_profit = 0
         for j in range(1, TARGET_HORIZON + 1):
             idx = i + j
             if idx >= len(df):
                 break
-            # Long barriers
-            if not long_hit:
-                if high[idx] >= upper:
-                    long_hit = True; long_tp = True; break
-                elif low[idx] <= lower:
-                    long_hit = True; long_tp = False; break
-            # Short barriers
-            if not short_hit:
-                if low[idx] <= upper_short:
-                    short_hit = True; short_tp = True; break
-                elif high[idx] >= lower_short:
-                    short_hit = True; short_tp = False; break
+            if high[idx] >= upper:
+                long_profit = TP_ATR_MULT
+                break
+            elif low[idx] <= lower:
+                long_profit = -SL_ATR_MULT
+                break
+
+        # 2. Evaluate Short outcome independently (symmetric, uncoupled)
+        short_profit = 0
+        for j in range(1, TARGET_HORIZON + 1):
+            idx = i + j
+            if idx >= len(df):
+                break
+            if low[idx] <= upper_short:
+                short_profit = TP_ATR_MULT
+                break
+            elif high[idx] >= lower_short:
+                short_profit = -SL_ATR_MULT
+                break
 
         # Primary label: which direction would have been profitable?
         # 1 = long profitable, -1 = short profitable, 0 = neither
-        long_profit = (TP_ATR_MULT if long_tp else -SL_ATR_MULT) if long_hit else 0
-        short_profit = (TP_ATR_MULT if short_tp else -SL_ATR_MULT) if short_hit else 0
-
         if long_profit > short_profit and long_profit > 0:
-            targets[i] = 1
-            primary_labels[i] = 1
+            targets[i] = 1.0
+            primary_labels[i] = 1.0
         elif short_profit > long_profit and short_profit > 0:
-            targets[i] = -1
-            primary_labels[i] = -1
+            targets[i] = -1.0
+            primary_labels[i] = -1.0
         elif long_profit > 0:
-            targets[i] = 1
-            primary_labels[i] = 1
+            targets[i] = 1.0
+            primary_labels[i] = 1.0
         elif short_profit > 0:
-            targets[i] = -1
-            primary_labels[i] = -1
+            targets[i] = -1.0
+            primary_labels[i] = -1.0
         else:
             # Neither hit barrier; use close at horizon
             exit_p = close[i + TARGET_HORIZON]
-            if exit_p > cc:
-                targets[i] = 1
-                primary_labels[i] = 1
-            elif exit_p < cc:
-                targets[i] = -1
-                primary_labels[i] = -1
+            if exit_p >= cc:
+                targets[i] = 1.0
+                primary_labels[i] = 1.0
             else:
-                targets[i] = 0
-                primary_labels[i] = 0
+                targets[i] = -1.0
+                primary_labels[i] = -1.0
 
     df['Target'] = targets
     df['Primary_Pred'] = primary_labels
@@ -463,9 +461,12 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_
     # 10. CLEANUP
     # ========================
     if is_training:
+        # Drop rows with NaN (including the trailing TARGET_HORIZON unlabelled rows)
         df = df.dropna().reset_index(drop=True)
     else:
-        # Live inference mode: fill missing values to guarantee live candles are retained
+        # Live inference mode: fill trailing target NaNs with 0 to preserve latest candles
+        df['Target'] = df['Target'].fillna(0)
+        df['Primary_Pred'] = df['Primary_Pred'].fillna(0)
         df = df.bfill().ffill().fillna(0).reset_index(drop=True)
 
     return df

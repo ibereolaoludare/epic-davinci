@@ -40,8 +40,28 @@ def build_walk_forward_splits(df, train_months=6, test_months=2):
         te_mask = (df['Time'] >= te_start) & (df['Time'] < te_end)
         if tr_mask.sum() > 200 and te_mask.sum() > 20:
             splits.append((tr_start, tr_end, te_start, te_end))
-        cursor = te_end
+        cursor += pd.DateOffset(months=test_months)
     return splits
+
+
+def get_oof_predictions(X_train, y_train, n_splits=3, depth=5, lr=0.05):
+    """Generate Out-Of-Fold predictions for meta-model training to prevent in-sample memorization."""
+    oof_preds = np.zeros(len(X_train))
+    fold_size = len(X_train) // n_splits
+    for fold in range(n_splits):
+        val_idx = list(range(fold * fold_size, (fold + 1) * fold_size if fold < n_splits - 1 else len(X_train)))
+        train_idx = [idx for idx in range(len(X_train)) if idx not in val_idx]
+        X_f_tr = X_train.iloc[train_idx]
+        y_f_tr = y_train.iloc[train_idx]
+        X_f_val = X_train.iloc[val_idx]
+        m = CatBoostClassifier(
+            iterations=200, learning_rate=lr, depth=depth, l2_leaf_reg=4,
+            loss_function='MultiClass', eval_metric='MultiClass',
+            auto_class_weights='Balanced', random_seed=42 + fold, verbose=0,
+        )
+        m.fit(X_f_tr, y_f_tr)
+        oof_preds[val_idx] = m.predict(X_f_val).flatten().astype(float)
+    return oof_preds
 
 
 def train_primary(X_train, y_train, X_val, y_val, depth=5, lr=0.05):
@@ -115,7 +135,7 @@ def simulate_trade(entry_price, entry_idx, trade_dir, prices, highs, lows,
 
 def run_walk_forward_backtest(ticker='USDJPY', meta_threshold=0.5,
                                tp_mult=2.0, sl_mult=1.0, horizon=12,
-                               regime_filter=None):
+                               regime_filter=None, depth=5, lr=0.05):
     """Full walk-forward backtest with meta-labeling and regime gating."""
     try:
         df = pd.read_csv(f'{ticker}_features_v7.csv').dropna()
@@ -147,8 +167,6 @@ def run_walk_forward_backtest(ticker='USDJPY', meta_threshold=0.5,
 
         # PURGE: Remove last TARGET_HORIZON rows from training set so that
         # no training label's future horizon overlaps into the test period.
-        # This is the López de Prado purged k-fold technique — without it,
-        # the last 12 training labels peek 48 hours into the test set.
         purge_n = 12  # TARGET_HORIZON used in feature_engineering_v7.py
         df_tr = df_tr.iloc[:-purge_n] if len(df_tr) > purge_n else df_tr
 
@@ -167,15 +185,15 @@ def run_walk_forward_backtest(ticker='USDJPY', meta_threshold=0.5,
         y_val = df_val_inner['Target']
 
         # Train primary
-        primary = train_primary(X_tr, y_tr, X_val, y_val)
+        primary = train_primary(X_tr, y_tr, X_val, y_val, depth=depth, lr=lr)
 
-        # Get primary predictions on inner train and val for meta
-        pri_preds_tr = primary.predict(X_tr).flatten().astype(float)
+        # Get OOF primary predictions on inner train for meta model (strictly unbiased)
+        pri_preds_tr = get_oof_predictions(X_tr, y_tr, depth=depth, lr=lr)
         pri_preds_val = primary.predict(X_val).flatten().astype(float)
 
         # Train meta
         meta = train_meta(X_tr, pri_preds_tr, y_tr.values,
-                          X_val, pri_preds_val, y_val.values)
+                          X_val, pri_preds_val, y_val.values, depth=depth, lr=lr)
 
         if meta is None:
             print(f"  Split {i+1}: Meta model failed, skipping")
@@ -230,12 +248,15 @@ def run_walk_forward_backtest(ticker='USDJPY', meta_threshold=0.5,
             )
 
             # Costs (pair-aware pip sizes)
-            pip_size = 0.01 if ticker.endswith('JPY') else 0.0001
+            pip_size = 0.01 if ticker.endswith('JPY') else (0.10 if ticker in ['XAUUSD', 'GOLD'] else 0.0001)
             session = get_session(entry_time)
-            spread_pips = 0.5 if session in ['London', 'NY', 'London/NY Overlap'] else 1.5
+            if ticker in ['XAUUSD', 'GOLD']:
+                spread_pips = 2.0 if session in ['London', 'NY', 'London/NY Overlap'] else 3.5
+                swap_cost = (bars_held * 4 / 24) * 0.1 * pip_size
+            else:
+                spread_pips = 0.5 if session in ['London', 'NY', 'London/NY Overlap'] else 1.5
+                swap_cost = (bars_held * 4 / 24) * 0.2 * pip_size
             spread_cost = spread_pips * pip_size
-            days_held = bars_held * 4 / 24  # H4 candles to days
-            swap_cost = days_held * 0.2 * pip_size
             total_cost = spread_cost + swap_cost
             profit -= total_cost
 

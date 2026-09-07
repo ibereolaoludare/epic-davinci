@@ -21,6 +21,7 @@ import joblib
 import json
 import sys
 from feature_engineering_v7 import get_feature_cols
+from backtest_v7 import get_oof_predictions
 
 
 # Per-pair production configs (execution params, not training-label params)
@@ -28,37 +29,19 @@ PAIR_CONFIGS = {
     'USDJPY': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.50,
-        'regime_filter': ['trend', 'range', 'risk_on'],
+        'regime_filter': ['trend', 'range'],
         'depth': 5, 'lr': 0.05
     },
     'GBPJPY': {
         'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 4,
         'meta_threshold': 0.50,
-        'regime_filter': ['trend', 'range', 'risk_on'],
-        'depth': 5, 'lr': 0.05
-    },
-    'AUDUSD': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 4,
-        'meta_threshold': 0.52,
-        'regime_filter': ['trend', 'risk_on'],
-        'depth': 6, 'lr': 0.03
-    },
-    'EURUSD': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.51,
-        'regime_filter': ['mixed', 'trend'],
-        'depth': 5, 'lr': 0.05
-    },
-    'GBPUSD': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.40,
-        'regime_filter': ['mixed', 'risk_off', 'trend'],
+        'regime_filter': ['range', 'risk_on'],
         'depth': 5, 'lr': 0.05
     },
     'XAUUSD': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.50,
-        'regime_filter': ['trend', 'range', 'risk_on'],
+        'meta_threshold': 0.52,
+        'regime_filter': ['range', 'risk_on'],
         'depth': 5, 'lr': 0.05
     },
 }
@@ -115,9 +98,9 @@ def main():
     primary.fit(X_tr, y_tr, eval_set=(X_val, y_val),
                 early_stopping_rounds=50, use_best_model=True)
 
-    pri_tr = primary.predict(X_tr).flatten().astype(float)
+    pri_tr = get_oof_predictions(X_tr, y_tr, depth=depth, lr=lr)
     pri_val = primary.predict(X_val).flatten().astype(float)
-    print(f"Primary Train Acc: {(pri_tr == y_tr).mean():.3f}")
+    print(f"Primary Train OOF Acc: {(pri_tr == y_tr).mean():.3f}")
     print(f"Primary Val Acc: {(pri_val == y_val).mean():.3f}")
 
     # --- Meta Model ---

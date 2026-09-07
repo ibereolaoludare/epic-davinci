@@ -84,7 +84,9 @@ def fetch_cot_data():
     # Extract JPY
     jpy = df_all[df_all[name_col].str.contains('YEN|JPY', case=False, na=False)].copy()
     if not jpy.empty and date_col and long_col and short_col:
-        jpy['date'] = pd.to_datetime(jpy[date_col])
+        # CFTC report is Tuesday, released Friday 15:30 EST (20:30 UTC).
+        # Add 4 calendar days (Tuesday -> Saturday) so it is strictly causal for Monday market open.
+        jpy['date'] = pd.to_datetime(jpy[date_col]) + pd.Timedelta(days=4)
         jpy['COT_Long'] = pd.to_numeric(jpy[long_col], errors='coerce')
         jpy['COT_Short'] = pd.to_numeric(jpy[short_col], errors='coerce')
         jpy['COT_Net'] = jpy['COT_Long'] - jpy['COT_Short']
@@ -96,7 +98,8 @@ def fetch_cot_data():
     # Extract AUD (Australian Dollar - CME 232741)
     aud = df_all[df_all[name_col].str.contains('AUSTRALIAN|AUD', case=False, na=False)].copy()
     if not aud.empty and date_col and long_col and short_col:
-        aud['date'] = pd.to_datetime(aud[date_col])
+        # CFTC report is Tuesday, released Friday 15:30 EST (20:30 UTC).
+        aud['date'] = pd.to_datetime(aud[date_col]) + pd.Timedelta(days=4)
         aud['COT_AUD_Long'] = pd.to_numeric(aud[long_col], errors='coerce')
         aud['COT_AUD_Short'] = pd.to_numeric(aud[short_col], errors='coerce')
         aud['COT_AUD_Net'] = aud['COT_AUD_Long'] - aud['COT_AUD_Short']

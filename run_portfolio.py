@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 from backtest_v7 import run_walk_forward_backtest, build_walk_forward_splits, \
-    train_primary, train_meta, simulate_trade
+    train_primary, train_meta, simulate_trade, get_oof_predictions
 from feature_engineering_v7 import get_feature_cols
 from timezone_utils import get_session
 import sys
@@ -24,25 +24,19 @@ PORTFOLIO_CONFIGS = {
     'USDJPY': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.50,
-        'regime_filter': ['trend', 'range', 'risk_on'],
+        'regime_filter': ['trend', 'range'],
         'depth': 5, 'lr': 0.05
     },
     'GBPJPY': {
         'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 4,
         'meta_threshold': 0.50,
-        'regime_filter': ['trend', 'range', 'risk_on'],
+        'regime_filter': ['range', 'risk_on'],
         'depth': 5, 'lr': 0.05
-    },
-    'AUDUSD': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 4,
-        'meta_threshold': 0.52,
-        'regime_filter': ['trend', 'risk_on'],
-        'depth': 6, 'lr': 0.03
     },
     'XAUUSD': {
         'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.50,
-        'regime_filter': ['trend', 'range', 'risk_on'],
+        'meta_threshold': 0.52,
+        'regime_filter': ['range', 'risk_on'],
         'depth': 5, 'lr': 0.05
     }
 }
@@ -96,7 +90,7 @@ def run_pair_walk_forward(ticker, cfg):
         y_val = df_val_inner['Target']
 
         primary = train_primary(X_tr, y_tr, X_val, y_val, depth=depth, lr=lr)
-        pri_tr = primary.predict(X_tr).flatten().astype(float)
+        pri_tr = get_oof_predictions(X_tr, y_tr, depth=depth, lr=lr)
         pri_val = primary.predict(X_val).flatten().astype(float)
         meta = train_meta(X_tr, pri_tr, y_tr.values, X_val, pri_val, y_val.values, depth=depth, lr=lr)
         if meta is None:
