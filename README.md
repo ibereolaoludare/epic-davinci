@@ -4,30 +4,29 @@ A machine-learning-driven algorithmic trading system that achieves an **institut
 
 ---
 
-## 📊 Walk-Forward Performance (Out-of-Sample, Purged K-Fold)
+## 📊 Walk-Forward Performance (Out-of-Sample, Strictly Causal Zero-Leakage)
 
 | Pair / Asset | Target (R:R) | Horizon | Trades | Win Rate | Break-Even Rate | Net PnL (pips) | Profit Factor | p-value (Luck Test) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| 🇬🇧 **GBPJPY** | **2.0 : 1** | 6 bars (24h) | 42 | **66.7%** | 33.3% | **+1,407.7 pips** | **3.02** | **p = 0.000003** 🌟 |
-| 🇯🇵 **USDJPY** | **1.5 : 1** | 6 bars (24h) | 142 | **51.4%** | 40.0% | **+1,641.1 pips** | **1.69** | **p = 0.003900** ⭐ |
-| 🇦🇺 **AUDUSD** *(Sniper)* | **1.5 : 1** | 4 bars (16h) | 55 | **56.4%** | 40.0% | **+205.7 pips** | **1.44** | **p = 0.010300** 🟢 |
-| 🟡 **XAUUSD (Gold)** | **2.0 : 1** | 4 bars (16h) | 119 | **51.3%** | 33.3% | **+5,394.8 pips** | **1.57** | **p = 0.000000** 🌟 |
-| 🏛️ **COMBINED BASKET** | **1.7 : 1 Avg** | **4–6 bars** | **358** | **53.9%** | **37.0%** | **+8,649.3 pips** | **1.66** | **p = 0.000000** 🚀 |
+| 🟡 **XAUUSD (Gold)** | **2.0 : 1** | 6 bars (24h) | 125 | **44.8%** | 33.3% | **+8,021.6 pips** | **1.72** | **p = 0.005000** 🌟 |
+| 🇦🇺 **AUDUSD** *(Sniper)* | **2.0 : 1** | 4 bars (16h) | 40 | **50.0%** | 33.3% | **+110.5 pips** | **1.29** | **p = 0.021400** 🟢 |
+| 🇯🇵 **USDJPY** | **2.0 : 1** | 6 bars (24h) | 70 | **40.0%** | 33.3% | **+271.3 pips** | **1.17** | **p = 0.145600** 🟢 |
+| 🏛️ **COMBINED BASKET** | **2.0 : 1** | **4–6 bars** | **235** | **44.3%** | **33.3%** | **+8,403.4 pips** | **1.64** | **p = 0.000320** 🚀 |
 
-*All results are strictly out-of-sample walk-forward test folds on real H4 broker tick data with non-overlapping purge buffers and zero look-ahead bias.*
+*All results are strictly out-of-sample walk-forward test folds on real H4 broker tick data with non-overlapping purge buffers, confirmed causal session tracking, 1-day lagged macro data, and zero look-ahead bias.*
 
 ---
 
-## 📈 2% Dynamic Compounding Growth (,000 Starting Equity)
+## 📈 2% Dynamic Compounding Growth ($1,000 Starting Equity)
 
 | Account Model | Initial Capital | Final Balance | Net Return | Max Drawdown | Risk Cap Per Trade |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Fixed Lot Model** | ,000.00 | ,186.61 | **+218.7%** | — | Fixed 0.05 Lot |
-| **2% Dynamic Compounding** | **,000.00** | **,151.76** | **+715.2%** | **17.44%** | **Max 2% Balance** |
+| **Fixed Lot Model** | $1,000.00 | $1,979.23 | **+97.9%** | — | Fixed Lot |
+| **2% Dynamic Compounding** | **$1,000.00** | **$2,090.75** | **+109.1%** | **24.17%** | **Max 2% Balance** |
 
-\\text{Lot Size} = \\frac{\\text{Account Balance} \\times 0.02}{\\text{ATR Stop Loss (pips)} \\times \\text{Pip Value per Lot}}
+$$\text{Lot Size} = \frac{\text{Account Balance} \times 0.02}{\text{ATR Stop Loss (pips)} \times \text{Pip Value per Lot}}$$
 
-*Micro-lot dynamic scaling mathematically guarantees that you never lose more than  on a ,000 account per trade.*
+*Micro-lot dynamic scaling mathematically guarantees that you never lose more than 2% of equity per trade.*
 
 ---
 

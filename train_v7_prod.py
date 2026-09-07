@@ -26,21 +26,21 @@ from feature_engineering_v7 import get_feature_cols
 # Per-pair production configs (execution params, not training-label params)
 PAIR_CONFIGS = {
     'USDJPY': {
-        'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 6,
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.50,
-        'regime_filter': ['risk_on', 'intervention', 'range', 'trend'],
+        'regime_filter': ['trend', 'range', 'risk_on'],
         'depth': 5, 'lr': 0.05
     },
     'GBPJPY': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.50,
-        'regime_filter': ['risk_on', 'risk_off', 'trend', 'mixed'],
-        'depth': 6, 'lr': 0.03
-    },
-    'AUDUSD': {
         'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 4,
         'meta_threshold': 0.50,
-        'regime_filter': ['risk_on', 'trend'],
+        'regime_filter': ['trend', 'range', 'risk_on'],
+        'depth': 5, 'lr': 0.05
+    },
+    'AUDUSD': {
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 4,
+        'meta_threshold': 0.52,
+        'regime_filter': ['trend', 'risk_on'],
         'depth': 6, 'lr': 0.03
     },
     'EURUSD': {
@@ -56,7 +56,7 @@ PAIR_CONFIGS = {
         'depth': 5, 'lr': 0.05
     },
     'XAUUSD': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 4,
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.50,
         'regime_filter': ['trend', 'range', 'risk_on'],
         'depth': 5, 'lr': 0.05

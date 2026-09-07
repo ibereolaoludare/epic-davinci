@@ -22,25 +22,25 @@ warnings.filterwarnings('ignore')
 
 PORTFOLIO_CONFIGS = {
     'USDJPY': {
-        'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 6,
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.50,
-        'regime_filter': ['risk_on', 'intervention', 'range', 'trend'],
+        'regime_filter': ['trend', 'range', 'risk_on'],
         'depth': 5, 'lr': 0.05
     },
     'GBPJPY': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.50,
-        'regime_filter': ['risk_on', 'risk_off', 'trend', 'mixed'],
-        'depth': 6, 'lr': 0.03
-    },
-    'AUDUSD': {
         'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 4,
         'meta_threshold': 0.50,
-        'regime_filter': ['risk_on', 'trend'],
+        'regime_filter': ['trend', 'range', 'risk_on'],
+        'depth': 5, 'lr': 0.05
+    },
+    'AUDUSD': {
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 4,
+        'meta_threshold': 0.52,
+        'regime_filter': ['trend', 'risk_on'],
         'depth': 6, 'lr': 0.03
     },
     'XAUUSD': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 4,
+        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
         'meta_threshold': 0.50,
         'regime_filter': ['trend', 'range', 'risk_on'],
         'depth': 5, 'lr': 0.05
@@ -145,6 +145,7 @@ def run_pair_walk_forward(ticker, cfg):
             skip_until = exit_idx + 1
 
             exit_time = times[min(exit_idx, len(times)-1)]
+            trade_sl_pips = (atrs[j] * sl) / pip_size
             all_trades.append({
                 'ticker': ticker,
                 'entry_time': times[j],
@@ -155,6 +156,7 @@ def run_pair_walk_forward(ticker, cfg):
                 'meta_conf': float(meta_probs[j]),
                 'pips': pips,
                 'win': profit > 0,
+                'sl_pips': trade_sl_pips,
             })
 
     return all_trades
@@ -311,14 +313,15 @@ def main():
 
     for t in all_trades:
         pip_val = usd_per_pip_per_lot.get(t['ticker'], 10.0)
+        trade_sl = max(10.0, t.get('sl_pips', avg_loss_pips))
         # Fixed 2% risk based on initial balance
-        fixed_lot = max(0.01, (initial_balance * 0.02) / (avg_loss_pips * pip_val))
+        fixed_lot = max(0.01, round((initial_balance * 0.02) / (trade_sl * pip_val), 2))
         fixed_pnl = t['pips'] * pip_val * fixed_lot
         fixed_balance += fixed_pnl
         fixed_equity_curve.append(fixed_balance)
 
         # Dynamic 2% compounding risk
-        comp_lot = max(0.01, (comp_balance * 0.02) / (avg_loss_pips * pip_val))
+        comp_lot = max(0.01, round((comp_balance * 0.02) / (trade_sl * pip_val), 2))
         comp_pnl = t['pips'] * pip_val * comp_lot
         comp_balance += comp_pnl
         comp_equity_curve.append(comp_balance)

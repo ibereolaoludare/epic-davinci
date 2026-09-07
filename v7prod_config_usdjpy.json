@@ -1,14 +1,13 @@
 {
   "ticker": "USDJPY",
-  "tp_mult": 1.5,
+  "tp_mult": 2.0,
   "sl_mult": 1.0,
   "horizon": 6,
   "meta_threshold": 0.5,
   "regime_filter": [
-    "risk_on",
-    "intervention",
+    "trend",
     "range",
-    "trend"
+    "risk_on"
   ],
   "feature_cols": [
     "Time_Of_Day_Sin",

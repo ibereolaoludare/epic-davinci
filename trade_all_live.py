@@ -30,7 +30,7 @@ def run_trader(trader):
 
 def main():
     parser = argparse.ArgumentParser(description='Epic DaVinci V7 Master Live Portfolio Daemon')
-    parser.add_argument('--pairs', nargs='+', default=['USDJPY', 'GBPJPY', 'AUDUSD', 'XAUUSD'],
+    parser.add_argument('--pairs', nargs='+', default=['USDJPY', 'AUDUSD', 'XAUUSD'],
                         help='List of currency pairs to trade simultaneously')
     parser.add_argument('--risk', type=float, default=0.02,
                         help='Risk per trade as fraction of account (default: 0.02 = 2%)')

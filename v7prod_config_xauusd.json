@@ -2,7 +2,7 @@
   "ticker": "XAUUSD",
   "tp_mult": 2.0,
   "sl_mult": 1.0,
-  "horizon": 4,
+  "horizon": 6,
   "meta_threshold": 0.5,
   "regime_filter": [
     "trend",

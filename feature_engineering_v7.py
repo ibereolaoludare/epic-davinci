@@ -119,39 +119,44 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_
     df['Momentum_30'] = df['Close'].pct_change(30) * 100  # 5-day momentum
 
     # ========================
-    # 3. SESSION RANGE BREAKOUT (PAIR-AWARE)
+    # 3. SESSION RANGE BREAKOUT (STRICTLY CAUSAL)
     # ========================
+    # Asian/Tokyo session = 00:00 and 04:00 UTC candles. Complete at 08:00 UTC.
+    # Major pairs (JPY, AUD, Gold) form ranges in Asian session and breakout in London/NY.
+    # Causal logic:
+    # - For candles at 00:00 and 04:00 UTC, the current Asian session is still forming,
+    #   so use the confirmed, completed Asian session from the PREVIOUS DAY.
+    # - For candles at 08:00, 12:00, 16:00, and 20:00 UTC, today's Asian session is closed
+    #   and can be safely consumed. Zero future lookahead.
+    target_hours = [0, 4]
+    complete_hour = 8
+
+    df_raw_copy = df.copy()
+    df_raw_copy['Date'] = df_raw_copy['Time'].dt.date
+    sess_daily = df_raw_copy[df_raw_copy['Hour'].isin(target_hours)].groupby('Date').agg(
+        Sess_H=('High', 'max'),
+        Sess_L=('Low', 'min')
+    ).reset_index()
+    sess_daily['Date_str'] = sess_daily['Date'].astype(str)
+
+    df['Date_curr_str'] = df['Time'].dt.date.astype(str)
+    df['Date_prev_str'] = (df['Time'] - pd.Timedelta(days=1)).dt.date.astype(str)
+
+    df = df.merge(sess_daily[['Date_str', 'Sess_H', 'Sess_L']], left_on='Date_curr_str', right_on='Date_str', how='left')
+    df = df.rename(columns={'Sess_H': 'Today_Sess_H', 'Sess_L': 'Today_Sess_L'}).drop(columns=['Date_str'])
+
+    df = df.merge(sess_daily[['Date_str', 'Sess_H', 'Sess_L']], left_on='Date_prev_str', right_on='Date_str', how='left')
+    df = df.rename(columns={'Sess_H': 'Prev_Sess_H', 'Sess_L': 'Prev_Sess_L'}).drop(columns=['Date_str'])
+
     roll_high_24h = df['High'].rolling(6, min_periods=1).max()
     roll_low_24h = df['Low'].rolling(6, min_periods=1).min()
 
-    if ticker in ['USDJPY', 'AUDUSD']:
-        # Tokyo / Sydney session = 00:00 and 04:00 UTC candles. Complete at 08:00.
-        target_hours = [0, 4]
-        complete_hour = 8
-    else:
-        # On H4, London session = 08:00 and 12:00 UTC candles. Complete at 16:00.
-        target_hours = [8, 12]
-        complete_hour = 16
+    is_complete = df['Hour'] >= complete_hour
+    causal_h = np.where(is_complete, df['Today_Sess_H'], df['Prev_Sess_H'])
+    causal_l = np.where(is_complete, df['Today_Sess_L'], df['Prev_Sess_L'])
 
-    df['Date'] = df['Time'].dt.date
-    df['Is_Target_Session'] = df['Hour'].isin(target_hours).astype(int)
-
-    session_df = df[df['Is_Target_Session'] == 1].groupby('Date').agg(
-        Session_High=('High', 'max'),
-        Session_Low=('Low', 'min')
-    ).reset_index()
-
-    if not session_df.empty:
-        session_df['Date_Str'] = session_df['Date'].astype(str)
-        df['Date_Str'] = df['Date'].astype(str)
-        df = df.merge(session_df[['Date_Str', 'Session_High', 'Session_Low']],
-                      on='Date_Str', how='left')
-        df['Session_High'] = df['Session_High'].ffill().bfill().fillna(roll_high_24h)
-        df['Session_Low'] = df['Session_Low'].ffill().bfill().fillna(roll_low_24h)
-        df = df.drop(columns=['Date_Str'], errors='ignore')
-    else:
-        df['Session_High'] = roll_high_24h
-        df['Session_Low'] = roll_low_24h
+    df['Session_High'] = pd.Series(causal_h).ffill().bfill().fillna(roll_high_24h)
+    df['Session_Low'] = pd.Series(causal_l).ffill().bfill().fillna(roll_low_24h)
 
     df['Session_Range'] = (df['Session_High'] - df['Session_Low']) / df['ATR'].replace(0, np.nan)
     df['Session_Range'] = df['Session_Range'].fillna(0)
@@ -164,7 +169,7 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_
     df['Session_Dist_Mid'] = (df['Close'] - session_mid) / df['ATR'].replace(0, np.nan)
     df['Session_Dist_Mid'] = df['Session_Dist_Mid'].fillna(0)
 
-    df = df.drop(columns=['Date', 'Is_Target_Session', 'Session_Complete_Time'], errors='ignore')
+    df = df.drop(columns=['Date_curr_str', 'Date_prev_str', 'Today_Sess_H', 'Today_Sess_L', 'Prev_Sess_H', 'Prev_Sess_L'], errors='ignore')
 
     # ========================
     # 4. CENTRAL BANK RATES (backward merge)
@@ -252,6 +257,8 @@ def process_features_v7(df_raw, alt_df=None, rates_df=None, ticker='USDJPY', is_
     if alt_df is not None and not alt_df.empty:
         alt_df = alt_df.copy()
         alt_df['date'] = pd.to_datetime(alt_df['date'], utc=True).astype('datetime64[ns, UTC]')
+        # Strict 1-day lag: EOD data (US10Y, VIX, DXY, Copper, COT) from day D close is only merged on day D+1
+        alt_df['date'] = alt_df['date'] + pd.Timedelta(days=1)
         alt_df = alt_df.sort_values('date')
         df = pd.merge_asof(df.sort_values('Time'), alt_df,
                            left_on='Time', right_on='date', direction='backward')
