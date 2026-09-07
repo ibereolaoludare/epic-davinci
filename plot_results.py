@@ -131,6 +131,9 @@ def plot_monthly_pnl(all_trades, per_pair, savepath):
     fig, axes = plt.subplots(len(pairs) + 1, 1, figsize=(14, 4 * (len(pairs) + 1)),
                              sharex=True)
 
+    # Collect all calendar months across the portfolio for universal x-axis alignment
+    all_months = sorted(list(set([pd.Timestamp(t['entry_time']).strftime('%Y-%m') for t in all_trades])))
+
     # Per-pair monthly
     for i, pair in enumerate(pairs):
         ax = axes[i]
@@ -140,20 +143,20 @@ def plot_monthly_pnl(all_trades, per_pair, savepath):
             key = pd.Timestamp(t['entry_time']).strftime('%Y-%m')
             monthly[key] = monthly.get(key, 0) + t['pips']
 
-        months = sorted(monthly.keys())
-        vals = [monthly[m] for m in months]
-        colors = [COLORS['win'] if v > 0 else COLORS['loss'] for v in vals]
+        vals = [monthly.get(m, 0.0) for m in all_months]
+        colors = [COLORS['win'] if v > 0 else (COLORS['loss'] if v < 0 else '#bdc3c7') for v in vals]
 
-        ax.bar(range(len(vals)), vals, color=colors, edgecolor='white', linewidth=0.5)
+        ax.bar(range(len(all_months)), vals, color=colors, edgecolor='white', linewidth=0.5)
         ax.axhline(0, color='gray', linewidth=0.8)
         ax.set_ylabel(f'{pair}\n(pips)', fontsize=10)
         ax.set_title(f'{pair} Monthly PnL', fontsize=12, fontweight='bold')
         ax.grid(True, alpha=0.2, axis='y')
 
-        # Annotate values
+        # Annotate non-zero values
         for j, v in enumerate(vals):
-            ax.text(j, v + (3 if v > 0 else -5), f'{v:.0f}',
-                    ha='center', fontsize=8, fontweight='bold')
+            if abs(v) > 0.01:
+                ax.text(j, v + (3 if v > 0 else -6), f'{v:.0f}',
+                        ha='center', fontsize=7.5, fontweight='bold')
 
     # Portfolio monthly (bottom)
     ax = axes[-1]
@@ -162,21 +165,21 @@ def plot_monthly_pnl(all_trades, per_pair, savepath):
         key = pd.Timestamp(t['entry_time']).strftime('%Y-%m')
         monthly[key] = monthly.get(key, 0) + t['pips']
 
-    months = sorted(monthly.keys())
-    vals = [monthly[m] for m in months]
-    colors = [COLORS['win'] if v > 0 else COLORS['loss'] for v in vals]
+    vals = [monthly.get(m, 0.0) for m in all_months]
+    colors = [COLORS['win'] if v > 0 else (COLORS['loss'] if v < 0 else '#bdc3c7') for v in vals]
 
-    ax.bar(range(len(vals)), vals, color=colors, edgecolor='white', linewidth=0.5)
+    ax.bar(range(len(all_months)), vals, color=colors, edgecolor='white', linewidth=0.5)
     ax.axhline(0, color='gray', linewidth=0.8)
     ax.set_ylabel('Portfolio\n(pips)', fontsize=10)
     ax.set_title('Portfolio Combined Monthly PnL', fontsize=12, fontweight='bold')
-    ax.set_xticks(range(len(months)))
-    ax.set_xticklabels(months, rotation=45, ha='right', fontsize=9)
+    ax.set_xticks(range(len(all_months)))
+    ax.set_xticklabels(all_months, rotation=45, ha='right', fontsize=9)
     ax.grid(True, alpha=0.2, axis='y')
 
     for j, v in enumerate(vals):
-        ax.text(j, v + (5 if v > 0 else -8), f'{v:.0f}',
-                ha='center', fontsize=8, fontweight='bold')
+        if abs(v) > 0.01:
+            ax.text(j, v + (5 if v > 0 else -8), f'{v:.0f}',
+                    ha='center', fontsize=8, fontweight='bold')
 
     fig.tight_layout()
     fig.savefig(savepath, dpi=150)
