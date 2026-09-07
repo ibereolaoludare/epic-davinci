@@ -38,6 +38,16 @@ PORTFOLIO_CONFIGS = {
         'meta_threshold': 0.50,
         'regime_filter': ['range'],
         'depth': 5, 'lr': 0.05
+    },
+    'AUDUSD': {
+        'modes': [
+            {'allowed_hours': [0, 4], 'regime_filter': ['trend'], 'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 6, 'meta_threshold': 0.50},
+            {'allowed_hours': [8, 12, 16], 'regime_filter': None, 'tp_mult': 1.3, 'sl_mult': 1.0, 'horizon': 8, 'meta_threshold': 0.56},
+        ],
+        'tp_mult': 1.25, 'sl_mult': 1.0, 'horizon': 8,
+        'meta_threshold': 0.50,
+        'regime_filter': None,
+        'depth': 5, 'lr': 0.05
     }
 }
 
@@ -58,9 +68,11 @@ def run_pair_walk_forward(ticker, cfg):
     if len(splits) < 2:
         return []
 
-    tp, sl, h = cfg['tp_mult'], cfg['sl_mult'], cfg['horizon']
-    mt = cfg['meta_threshold']
-    rf = cfg['regime_filter']
+    has_modes = 'modes' in cfg
+    max_h = max([m['horizon'] for m in cfg['modes']]) if has_modes else cfg.get('horizon', 6)
+    tp, sl, h = cfg.get('tp_mult', 1.0), cfg.get('sl_mult', 1.0), cfg.get('horizon', 6)
+    mt = cfg.get('meta_threshold', 0.50)
+    rf = cfg.get('regime_filter')
     depth = cfg.get('depth', 5)
     lr = cfg.get('lr', 0.05)
     pip_size = 0.01 if ticker.endswith('JPY') else (0.10 if ticker in ['XAUUSD', 'GOLD'] else 0.0001)
@@ -110,22 +122,43 @@ def run_pair_walk_forward(ticker, cfg):
         regimes = df_te['Regime'].values
 
         skip_until = 0
-        for j in range(len(df_te) - h):
+        for j in range(len(df_te) - max_h):
             if j < skip_until:
                 continue
             d = pri_te[j]
             if d == 0:
                 continue
-            if meta_probs[j] < mt:
-                continue
-            if regimes[j] not in rf:
-                continue
             # Macro VIX Circuit Breaker: skip new entries during extreme volatility spikes
             if 'Macro_VIX_Lockout' in df_te.columns and df_te['Macro_VIX_Lockout'].iloc[j] == 1:
                 continue
 
+            if has_modes:
+                matched_mode = None
+                for mode in cfg['modes']:
+                    if mode.get('allowed_hours') and times[j].hour not in mode['allowed_hours']:
+                        continue
+                    if mode.get('regime_filter') and regimes[j] not in mode['regime_filter']:
+                        continue
+                    if meta_probs[j] < mode['meta_threshold']:
+                        continue
+                    matched_mode = mode
+                    break
+                if matched_mode is None:
+                    continue
+                trade_tp = matched_mode['tp_mult']
+                trade_sl = matched_mode['sl_mult']
+                trade_h = matched_mode['horizon']
+            else:
+                if meta_probs[j] < mt:
+                    continue
+                if rf is not None and regimes[j] not in rf:
+                    continue
+                if cfg.get('allowed_hours') and times[j].hour not in cfg['allowed_hours']:
+                    continue
+                trade_tp, trade_sl, trade_h = tp, sl, h
+
             profit, exit_idx, bars = simulate_trade(
-                prices[j], j, int(d), prices, highs, lows, atrs, tp, sl, h)
+                prices[j], j, int(d), prices, highs, lows, atrs, trade_tp, trade_sl, trade_h)
             session = get_session(times[j])
             if ticker in ['XAUUSD', 'GOLD']:
                 spread_pips = 2.0 if session in ['London', 'NY', 'London/NY Overlap'] else 3.5
@@ -139,7 +172,7 @@ def run_pair_walk_forward(ticker, cfg):
             skip_until = exit_idx + 1
 
             exit_time = times[min(exit_idx, len(times)-1)]
-            trade_sl_pips = (atrs[j] * sl) / pip_size
+            trade_sl_pips = (atrs[j] * trade_sl) / pip_size
             all_trades.append({
                 'ticker': ticker,
                 'entry_time': times[j],
@@ -151,6 +184,8 @@ def run_pair_walk_forward(ticker, cfg):
                 'pips': pips,
                 'win': profit > 0,
                 'sl_pips': trade_sl_pips,
+                'tp': trade_tp,
+                'sl': trade_sl,
             })
 
     return all_trades
@@ -255,9 +290,9 @@ def main():
     expectancy = total_pnl / n
 
     # Blended break-even (weighted by each pair's RR)
-    be_wr = np.mean([PORTFOLIO_CONFIGS[t['ticker']]['sl_mult'] /
-                     (PORTFOLIO_CONFIGS[t['ticker']]['tp_mult'] +
-                      PORTFOLIO_CONFIGS[t['ticker']]['sl_mult'])
+    be_wr = np.mean([t.get('sl', PORTFOLIO_CONFIGS[t['ticker']].get('sl_mult', 1.0)) /
+                     (t.get('tp', PORTFOLIO_CONFIGS[t['ticker']].get('tp_mult', 1.0)) +
+                      t.get('sl', PORTFOLIO_CONFIGS[t['ticker']].get('sl_mult', 1.0)))
                      for t in all_trades])
     p_portfolio = 1 - stats.binom.cdf(wins - 1, n, be_wr)
 

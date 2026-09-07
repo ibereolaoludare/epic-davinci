@@ -332,13 +332,15 @@ class LiveV7Trader:
         regime = feat_row['Regime'] if 'Regime' in feat_row.index else 'mixed'
         return direction, meta_prob, regime
 
-    def calc_sl_tp(self, entry_price, atr, direction):
+    def calc_sl_tp(self, entry_price, atr, direction, tp_mult=None, sl_mult=None):
+        tp_m = tp_mult if tp_mult is not None else self.tp_mult
+        sl_m = sl_mult if sl_mult is not None else self.sl_mult
         if direction == 1:
-            sl = entry_price - (atr * self.sl_mult)
-            tp = entry_price + (atr * self.tp_mult)
+            sl = entry_price - (atr * sl_m)
+            tp = entry_price + (atr * tp_m)
         else:
-            sl = entry_price + (atr * self.sl_mult)
-            tp = entry_price - (atr * self.tp_mult)
+            sl = entry_price + (atr * sl_m)
+            tp = entry_price - (atr * tp_m)
         return sl, tp
 
     def _get_filling_mode(self):
@@ -357,7 +359,7 @@ class LiveV7Trader:
         else:
             return mt5.ORDER_FILLING_RETURN
 
-    def execute_trade(self, direction, sl_price, tp_price, lot):
+    def execute_trade(self, direction, sl_price, tp_price, lot, comment=None):
         mt5 = self.mt5
         tick = mt5.symbol_info_tick(self.ticker)
 
@@ -371,6 +373,7 @@ class LiveV7Trader:
         digits = mt5.symbol_info(self.ticker).digits
         filling = self._get_filling_mode()
         dev_pts = 20 if self.ticker == 'AUDUSD' else 50
+        trade_comment = comment if comment else f'V7 {int(self.tp_mult*10)}x{int(self.sl_mult*10)}'
         request = {
             'action': mt5.TRADE_ACTION_DEAL,
             'symbol': self.ticker,
@@ -381,7 +384,7 @@ class LiveV7Trader:
             'tp': round(tp_price, digits),
             'deviation': dev_pts,
             'magic': 234000,
-            'comment': f'V7 {int(self.tp_mult*10)}x{int(self.sl_mult*10)}',
+            'comment': trade_comment,
             'type_time': mt5.ORDER_TIME_GTC,
             'type_filling': filling,
         }
@@ -481,7 +484,8 @@ class LiveV7Trader:
             self.save_state()
             return
 
-        if trade['candles_held'] >= self.horizon:
+        trade_horizon = trade.get('horizon', self.horizon)
+        if trade['candles_held'] >= trade_horizon:
             # Rollover spread protection: check current spread before market close
             tick = mt5.symbol_info_tick(self.ticker)
             current_spread = (tick.ask - tick.bid) / self.pip_size if tick else 1.0
@@ -489,19 +493,19 @@ class LiveV7Trader:
             max_spread = 5.0 if self.ticker in ['XAUUSD', 'GOLD'] else (2.0 if self.ticker == 'AUDUSD' else 3.5)
             
             # If during daily rollover (21:00-22:00 UTC) with wide spread, defer market exit briefly
-            if (21 <= now_hour <= 22 or current_spread > max_spread) and trade['candles_held'] == self.horizon:
+            if (21 <= now_hour <= 22 or current_spread > max_spread) and trade['candles_held'] == trade_horizon:
                 log.warning(f"Trade {trade['ticket']} reached horizon, but elevated spread ({current_spread:.1f} pips > max {max_spread:.1f}) "
                             f"or rollover hour detected. Deferring market close until spread normalizes.")
                 return
 
             log.info(f"Trade {trade['ticket']} reached horizon "
-                     f"({self.horizon} bars). Closing...")
+                     f"({trade_horizon} bars). Closing...")
             self.close_position(trade['ticket'], 'horizon_exit')
             self.active_trade = None
             self.save_state()
         else:
             log.info(f"Trade {trade['ticket']} holding "
-                     f"({trade['candles_held']}/{self.horizon} bars)")
+                     f"({trade['candles_held']}/{trade_horizon} bars)")
             self.save_state()
 
     def run(self):
@@ -584,18 +588,50 @@ class LiveV7Trader:
                     log.info("No trade (primary model neutral)")
                     continue
 
-                if meta_conf < self.meta_thresh:
-                    log.info(f"Meta confidence {meta_conf:.3f} < "
-                             f"{self.meta_thresh}, skipping")
-                    continue
+                now_utc = datetime.now(timezone.utc)
+                candle_hour = latest_time.hour if hasattr(latest_time, 'hour') else now_utc.hour
 
-                if regime not in self.regime_filter:
-                    log.info(f"Regime '{regime}' not in filter "
-                             f"{self.regime_filter}, skipping")
-                    continue
+                trade_tp_mult = self.tp_mult
+                trade_sl_mult = self.sl_mult
+                trade_horizon = self.horizon
+
+                if 'modes' in self.cfg and self.cfg['modes']:
+                    matched_mode = None
+                    for mode in self.cfg['modes']:
+                        if mode.get('allowed_hours') and candle_hour not in mode['allowed_hours']:
+                            continue
+                        if mode.get('regime_filter') and regime not in mode['regime_filter']:
+                            continue
+                        if meta_conf < mode['meta_threshold']:
+                            continue
+                        matched_mode = mode
+                        break
+                    if matched_mode is None:
+                        log.info(f"Candle hour={candle_hour} or regime='{regime}' or meta={meta_conf:.3f} "
+                                 f"did not match any active execution modes. Skipping.")
+                        continue
+                    trade_tp_mult = matched_mode['tp_mult']
+                    trade_sl_mult = matched_mode['sl_mult']
+                    trade_horizon = matched_mode['horizon']
+                    log.info(f"Matched Mode: TP={trade_tp_mult} SL={trade_sl_mult} H={trade_horizon}")
+                else:
+                    if meta_conf < self.meta_thresh:
+                        log.info(f"Meta confidence {meta_conf:.3f} < "
+                                 f"{self.meta_thresh}, skipping")
+                        continue
+
+                    if self.regime_filter and regime not in self.regime_filter:
+                        log.info(f"Regime '{regime}' not in filter "
+                                 f"{self.regime_filter}, skipping")
+                        continue
+
+                    if self.cfg.get('allowed_hours'):
+                        if candle_hour not in self.cfg['allowed_hours']:
+                            log.info(f"Candle hour {candle_hour} not in allowed_hours "
+                                     f"{self.cfg['allowed_hours']}, skipping")
+                            continue
 
                 # Persistent Circuit Breaker & Cooldown Lockout Check
-                now_utc = datetime.now(timezone.utc)
                 if self.circuit_breaker_lockout_until and now_utc < self.circuit_breaker_lockout_until:
                     rem_sec = (self.circuit_breaker_lockout_until - now_utc).total_seconds()
                     log.warning(f"Macro VIX Circuit Breaker ACTIVE ({int(rem_sec//3600)}h{int((rem_sec%3600)//60)}m remaining until {self.circuit_breaker_lockout_until.strftime('%Y-%m-%d %H:%M UTC')}). "
@@ -629,7 +665,7 @@ class LiveV7Trader:
                 pip_val = self.get_pip_value()
                 info = self.mt5.symbol_info(self.ticker)
                 sl_price, tp_price = self.calc_sl_tp(
-                    close_price, atr, direction)
+                    close_price, atr, direction, tp_mult=trade_tp_mult, sl_mult=trade_sl_mult)
                 sl_pips = abs(close_price - sl_price) / self.pip_size
                 lot = calc_lot_size(
                     self.account_balance, self.risk_pct,
@@ -644,7 +680,8 @@ class LiveV7Trader:
                          f"TP={abs(tp_price-close_price)/self.pip_size:.1f} pips | "
                          f"Lot={lot} | PipVal=${pip_val:.2f} | Risk=${self.account_balance*self.risk_pct:.2f}")
 
-                ticket = self.execute_trade(direction, sl_price, tp_price, lot)
+                comment_str = f'V7 {int(trade_tp_mult*10)}x{int(trade_sl_mult*10)}'
+                ticket = self.execute_trade(direction, sl_price, tp_price, lot, comment=comment_str)
                 if ticket:
                     self.active_trade = {
                         'ticket': ticket,
@@ -654,6 +691,7 @@ class LiveV7Trader:
                         'sl_price': sl_price,
                         'tp_price': tp_price,
                         'lot': lot,
+                        'horizon': trade_horizon,
                     }
                     self.save_state()
 

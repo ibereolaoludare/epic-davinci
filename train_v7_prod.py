@@ -44,6 +44,16 @@ PAIR_CONFIGS = {
         'regime_filter': ['range'],
         'depth': 5, 'lr': 0.05
     },
+    'AUDUSD': {
+        'modes': [
+            {'allowed_hours': [0, 4], 'regime_filter': ['trend'], 'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 6, 'meta_threshold': 0.50},
+            {'allowed_hours': [8, 12, 16], 'regime_filter': None, 'tp_mult': 1.3, 'sl_mult': 1.0, 'horizon': 8, 'meta_threshold': 0.56},
+        ],
+        'tp_mult': 1.25, 'sl_mult': 1.0, 'horizon': 8,
+        'meta_threshold': 0.50,
+        'regime_filter': None,
+        'depth': 5, 'lr': 0.05
+    },
 }
 
 
@@ -136,29 +146,54 @@ def main():
     regimes = df_holdout['Regime'].values
     times = df_holdout['Time'].dt.to_pydatetime()
 
-    TP_MULT, SL_MULT, HORIZON = cfg['tp_mult'], cfg['sl_mult'], cfg['horizon']
-    META_THRESH = cfg['meta_threshold']
-    REGIME_FILTER = cfg['regime_filter']
+    has_modes = 'modes' in cfg
+    max_h = max([m['horizon'] for m in cfg['modes']]) if has_modes else cfg.get('horizon', 6)
+    TP_MULT, SL_MULT, HORIZON = cfg.get('tp_mult', 1.0), cfg.get('sl_mult', 1.0), cfg.get('horizon', 6)
+    META_THRESH = cfg.get('meta_threshold', 0.50)
+    REGIME_FILTER = cfg.get('regime_filter')
 
     from timezone_utils import get_session
     from backtest_v7 import simulate_trade
 
     trades = []
     skip_until = 0
-    for j in range(len(df_holdout) - HORIZON):
+    for j in range(len(df_holdout) - max_h):
         if j < skip_until:
             continue
         d = pri_h[j]
         if d == 0:
             continue
-        if meta_probs_h[j] < META_THRESH:
+        if 'Macro_VIX_Lockout' in df_holdout.columns and df_holdout['Macro_VIX_Lockout'].iloc[j] == 1:
             continue
-        if regimes[j] not in REGIME_FILTER:
-            continue
+
+        if has_modes:
+            matched_mode = None
+            for mode in cfg['modes']:
+                if mode.get('allowed_hours') and times[j].hour not in mode['allowed_hours']:
+                    continue
+                if mode.get('regime_filter') and regimes[j] not in mode['regime_filter']:
+                    continue
+                if meta_probs_h[j] < mode['meta_threshold']:
+                    continue
+                matched_mode = mode
+                break
+            if matched_mode is None:
+                continue
+            tp_mult = matched_mode['tp_mult']
+            sl_mult = matched_mode['sl_mult']
+            horizon = matched_mode['horizon']
+        else:
+            if meta_probs_h[j] < META_THRESH:
+                continue
+            if REGIME_FILTER is not None and regimes[j] not in REGIME_FILTER:
+                continue
+            if cfg.get('allowed_hours') and times[j].hour not in cfg['allowed_hours']:
+                continue
+            tp_mult, sl_mult, horizon = TP_MULT, SL_MULT, HORIZON
 
         profit, exit_idx, bars = simulate_trade(
             prices[j], j, int(d), prices, highs, lows, atrs,
-            TP_MULT, SL_MULT, HORIZON
+            tp_mult, sl_mult, horizon
         )
         session = get_session(times[j])
         pip_size = 0.01 if ticker.endswith('JPY') else (0.10 if ticker in ['XAUUSD', 'GOLD'] else 0.0001)
@@ -193,6 +228,7 @@ def main():
         'tp_mult': TP_MULT, 'sl_mult': SL_MULT, 'horizon': HORIZON,
         'meta_threshold': META_THRESH,
         'regime_filter': REGIME_FILTER,
+        'modes': cfg.get('modes'),
         'feature_cols': feature_cols,
         'train_end': str(df_train_full['Time'].max()),
         'holdout_start': str(holdout_start),

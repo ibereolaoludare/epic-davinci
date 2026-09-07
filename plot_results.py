@@ -31,8 +31,11 @@ from run_portfolio import PORTFOLIO_CONFIGS, run_pair_walk_forward, apply_portfo
 
 COLORS = {
     'USDJPY': '#e74c3c',
-    'EURUSD': '#3498db',
-    'GBPUSD': '#2ecc71',
+    'GBPJPY': '#3498db',
+    'AUDUSD': '#f39c12',
+    'XAUUSD': '#d4af37',
+    'EURUSD': '#2980b9',
+    'GBPUSD': '#27ae60',
     'Portfolio': '#9b59b6',
     'win': '#2ecc71',
     'loss': '#e74c3c',
@@ -339,9 +342,9 @@ def plot_summary_dashboard(all_trades, per_pair, savepath):
     rmax = np.maximum.accumulate(cum)
     mdd = (rmax - cum).max() if len(cum) > 0 else 0
     exp = total_pnl / n if n > 0 else 0
-    be_wr = np.mean([PORTFOLIO_CONFIGS[t['ticker']]['sl_mult'] /
-                     (PORTFOLIO_CONFIGS[t['ticker']]['tp_mult'] +
-                      PORTFOLIO_CONFIGS[t['ticker']]['sl_mult'])
+    be_wr = np.mean([t.get('sl', PORTFOLIO_CONFIGS[t['ticker']].get('sl_mult', 1.0)) /
+                     (t.get('tp', PORTFOLIO_CONFIGS[t['ticker']].get('tp_mult', 1.0)) +
+                      t.get('sl', PORTFOLIO_CONFIGS[t['ticker']].get('sl_mult', 1.0)))
                      for t in all_trades])
     p_val = 1 - stats.binom.cdf(wins - 1, n, be_wr) if n > 0 else 1
 
@@ -414,18 +417,19 @@ def plot_summary_dashboard(all_trades, per_pair, savepath):
     ax6 = fig.add_subplot(gs[2, 2])
     ax6.axis('off')
     table_data = []
-    for pair in ['USDJPY', 'EURUSD', 'GBPUSD']:
+    for pair in per_pair.keys():
         trades = per_pair.get(pair, [])
         if not trades:
             continue
         n_p = len(trades)
         wr_p = sum(t['win'] for t in trades) / n_p * 100
         pnl_p = sum(t['pips'] for t in trades)
-        cfg = PORTFOLIO_CONFIGS[pair]
-        be = cfg['sl_mult'] / (cfg['tp_mult'] + cfg['sl_mult']) * 100
+        cfg = PORTFOLIO_CONFIGS.get(pair, {})
+        be = np.mean([t.get('sl', cfg.get('sl_mult', 1.0)) / (t.get('tp', cfg.get('tp_mult', 1.0)) + t.get('sl', cfg.get('sl_mult', 1.0))) for t in trades]) * 100
         p = 1 - stats.binom.cdf(sum(t['win'] for t in trades) - 1, n_p, be / 100)
+        rr_str = f"{cfg.get('tp_mult', 1.0)}:1" if 'modes' not in cfg else "Multi"
         table_data.append([pair, n_p, f'{wr_p:.1f}%', f'{pnl_p:+.0f}',
-                           f'{cfg["tp_mult"]}:1', f'{p:.4f}'])
+                           rr_str, f'{p:.4f}'])
 
     table = ax6.table(cellText=table_data,
                       colLabels=['Pair', 'Trades', 'WR', 'PnL', 'RR', 'p-val'],
@@ -444,7 +448,7 @@ def plot_summary_dashboard(all_trades, per_pair, savepath):
 
 
 def main():
-    pairs = sys.argv[1:] if len(sys.argv) > 1 else ['USDJPY', 'EURUSD', 'GBPUSD']
+    pairs = sys.argv[1:] if len(sys.argv) > 1 else ['USDJPY', 'GBPJPY', 'AUDUSD', 'XAUUSD']
     valid = [p for p in pairs if p in PORTFOLIO_CONFIGS]
     if not valid:
         print(f"No valid pairs. Supported: {list(PORTFOLIO_CONFIGS.keys())}")
