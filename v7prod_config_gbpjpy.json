@@ -1,12 +1,11 @@
 {
   "ticker": "GBPJPY",
-  "tp_mult": 1.5,
+  "tp_mult": 1.3,
   "sl_mult": 1.0,
   "horizon": 4,
   "meta_threshold": 0.5,
   "regime_filter": [
-    "range",
-    "risk_on"
+    "range"
   ],
   "feature_cols": [
     "Time_Of_Day_Sin",

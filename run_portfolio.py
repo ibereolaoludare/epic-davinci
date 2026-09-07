@@ -21,22 +21,22 @@ warnings.filterwarnings('ignore')
 
 
 PORTFOLIO_CONFIGS = {
+    'XAUUSD': {
+        'tp_mult': 1.2, 'sl_mult': 1.0, 'horizon': 8,
+        'meta_threshold': 0.48,
+        'regime_filter': ['range'],
+        'depth': 5, 'lr': 0.05
+    },
     'USDJPY': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.50,
-        'regime_filter': ['trend', 'range'],
+        'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 4,
+        'meta_threshold': 0.52,
+        'regime_filter': ['trend'],
         'depth': 5, 'lr': 0.05
     },
     'GBPJPY': {
-        'tp_mult': 1.5, 'sl_mult': 1.0, 'horizon': 4,
+        'tp_mult': 1.3, 'sl_mult': 1.0, 'horizon': 4,
         'meta_threshold': 0.50,
-        'regime_filter': ['range', 'risk_on'],
-        'depth': 5, 'lr': 0.05
-    },
-    'XAUUSD': {
-        'tp_mult': 2.0, 'sl_mult': 1.0, 'horizon': 6,
-        'meta_threshold': 0.52,
-        'regime_filter': ['range', 'risk_on'],
+        'regime_filter': ['range'],
         'depth': 5, 'lr': 0.05
     }
 }
