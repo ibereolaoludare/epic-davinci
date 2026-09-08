@@ -493,6 +493,77 @@ class LiveV7Trader:
         log.info(f"CLOSED ticket {ticket} ({reason}) @ {price:.5f}")
         return True
 
+    def _record_trade_closure(self, ticket, reason='SL/TP'):
+        """
+        Accurately query deal history for ONLY this trade ticket to record profit/loss,
+        update consecutive loss streak, and trigger cooldowns.
+        Prevents querying the whole account's deal history.
+        """
+        mt5 = self.mt5
+        total_profit = None
+
+        try:
+            # 1. First attempt: query specifically by position ticket
+            deals = mt5.history_deals_get(position=ticket)
+            if deals:
+                matching_deals = [d for d in deals if getattr(d, 'symbol', None) == self.ticker]
+                if matching_deals:
+                    total_profit = sum(d.profit + d.swap + d.fee for d in matching_deals)
+
+            # 2. Second attempt: query by date window and strictly filter by position_id/order/symbol
+            if total_profit is None:
+                from_time = datetime.now(timezone.utc) - timedelta(days=7)
+                to_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+                recent_deals = mt5.history_deals_get(from_time, to_time)
+                if recent_deals:
+                    matching_deals = [
+                        d for d in recent_deals
+                        if getattr(d, 'symbol', None) == self.ticker and (
+                            getattr(d, 'position_id', None) == ticket or
+                            getattr(d, 'order', None) == ticket
+                        )
+                    ]
+                    if matching_deals:
+                        total_profit = sum(d.profit + d.swap + d.fee for d in matching_deals)
+
+            # 3. Third attempt: match the most recent exit deal on this specific symbol
+            if total_profit is None:
+                from_time = datetime.now(timezone.utc) - timedelta(hours=12)
+                to_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+                recent_deals = mt5.history_deals_get(from_time, to_time)
+                if recent_deals:
+                    sym_exit_deals = [
+                        d for d in recent_deals
+                        if getattr(d, 'symbol', None) == self.ticker and getattr(d, 'entry', None) in [1, 2]
+                    ]
+                    if sym_exit_deals:
+                        last_deal = sym_exit_deals[-1]
+                        total_profit = last_deal.profit + last_deal.swap + last_deal.fee
+                        log.info(f"Matched recent exit deal #{last_deal.ticket} on {self.ticker} for position #{ticket}")
+
+            if total_profit is not None:
+                if total_profit > 0:
+                    log.info(f"Trade {ticket} closed ({reason}) in PROFIT (+${total_profit:.2f}). Resetting loss streak.")
+                    self.consecutive_losses = 0
+                    self.cooldown_until = None
+                else:
+                    self.consecutive_losses += 1
+                    log.warning(f"Trade {ticket} closed ({reason}) at a LOSS (-${abs(total_profit):.2f}). "
+                                f"Consecutive losses: {self.consecutive_losses}")
+                    if self.consecutive_losses >= 2:
+                        self.cooldown_until = datetime.now(timezone.utc) + timedelta(hours=24)
+                        log.warning(f"2 consecutive losses reached on {self.ticker}. 24-hour pair cooldown ACTIVE until "
+                                    f"{self.cooldown_until.strftime('%Y-%m-%d %H:%M UTC')}.")
+            else:
+                log.warning(f"Could not isolate MT5 deal record for ticket #{ticket} on {self.ticker}. "
+                            f"Assuming trade closed ({reason}); leaving loss streak unchanged.")
+
+        except Exception as e:
+            log.warning(f"Error inspecting MT5 deal history for ticket #{ticket}: {e}")
+
+        self.active_trade = None
+        self.save_state()
+
     def manage_active_trade(self, feat_row=None):
         if not self.active_trade:
             return
@@ -505,28 +576,7 @@ class LiveV7Trader:
         if not positions:
             log.info(f"Trade {trade['ticket']} closed by SL/TP after "
                      f"{trade['candles_held']} bars")
-            # Query deal history to check win/loss outcome and update cooldown
-            try:
-                from_time = datetime.now(timezone.utc) - timedelta(days=7)
-                deals = mt5.history_deals_get(from_time, datetime.now(timezone.utc), position=trade['ticket'])
-                if deals:
-                    total_profit = sum(d.profit + d.swap + d.fee for d in deals)
-                    if total_profit > 0:
-                        log.info(f"Trade {trade['ticket']} closed in PROFIT (+${total_profit:.2f}). Resetting loss streak.")
-                        self.consecutive_losses = 0
-                        self.cooldown_until = None
-                    else:
-                        self.consecutive_losses += 1
-                        log.warning(f"Trade {trade['ticket']} closed at a LOSS (-${abs(total_profit):.2f}). "
-                                    f"Consecutive losses: {self.consecutive_losses}")
-                        if self.consecutive_losses >= 2:
-                            self.cooldown_until = datetime.now(timezone.utc) + timedelta(hours=24)
-                            log.warning(f"2 consecutive losses reached. 24-hour pair cooldown ACTIVE until "
-                                        f"{self.cooldown_until.strftime('%Y-%m-%d %H:%M UTC')}.")
-            except Exception as e:
-                log.warning(f"Could not inspect deal history: {e}")
-            self.active_trade = None
-            self.save_state()
+            self._record_trade_closure(trade['ticket'], reason=f"SL/TP after {trade['candles_held']} bars")
             return
 
         # Check Adverse Signal Exit (For USDJPY and GBPJPY)
@@ -536,8 +586,7 @@ class LiveV7Trader:
                 log.warning(f"ADVERSE MODEL FLIP DETECTED (New Dir={direction}, Active Dir={trade['direction']}, "
                             f"Meta Conf={meta_conf:.3f} >= 0.52). Early cutting position to prevent adverse loss...")
                 self.close_position(trade['ticket'], 'adverse_signal_exit')
-                self.active_trade = None
-                self.save_state()
+                self._record_trade_closure(trade['ticket'], reason="adverse_signal_exit")
                 return
 
         trade_horizon = trade.get('horizon', self.horizon)
@@ -547,7 +596,7 @@ class LiveV7Trader:
             current_spread = (tick.ask - tick.bid) / self.pip_size if tick else 1.0
             now_hour = datetime.now(timezone.utc).hour
             max_spread = 5.0 if self.ticker in ['XAUUSD', 'GOLD'] else (2.0 if self.ticker == 'AUDUSD' else 3.5)
-            
+
             # If during daily rollover (21:00-22:00 UTC) with wide spread, defer market exit briefly
             if (21 <= now_hour <= 22 or current_spread > max_spread) and trade['candles_held'] == trade_horizon:
                 log.warning(f"Trade {trade['ticket']} reached horizon, but elevated spread ({current_spread:.1f} pips > max {max_spread:.1f}) "
@@ -557,8 +606,7 @@ class LiveV7Trader:
             log.info(f"Trade {trade['ticket']} reached horizon "
                      f"({trade_horizon} bars). Closing...")
             self.close_position(trade['ticket'], 'horizon_exit')
-            self.active_trade = None
-            self.save_state()
+            self._record_trade_closure(trade['ticket'], reason=f"horizon_exit after {trade_horizon} bars")
         else:
             log.info(f"Trade {trade['ticket']} holding "
                      f"({trade['candles_held']}/{trade_horizon} bars)")
